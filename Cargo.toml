@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Check for outdated Python dependencies"
 license = "MIT"
-repository = "https://github.com/folk/python-check-updates"
+repository = "https://github.com/folknor/python-check-updates"
 keywords = ["python", "dependencies", "pip", "uv", "conda"]
 categories = ["command-line-utilities", "development-tools"]
 
