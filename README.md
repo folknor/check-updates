@@ -158,4 +158,4 @@ Report them. Or fix them yourself. The source code is right there.
 
 ## LICENSE
 
-Do whatever you want with it. I am not your lawyer.
+MIT. You know what it is. There's no license file included.
