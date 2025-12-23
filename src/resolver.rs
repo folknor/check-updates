@@ -276,6 +276,7 @@ mod tests {
     fn test_default_mode_pinned_no_update() {
         let args = Args {
             path: None,
+            global: false,
             update: false,
             minor: false,
             force_latest: false,
@@ -296,6 +297,7 @@ mod tests {
     fn test_default_mode_range_updates_in_range() {
         let args = Args {
             path: None,
+            global: false,
             update: false,
             minor: false,
             force_latest: false,
@@ -317,6 +319,7 @@ mod tests {
     fn test_default_mode_unbounded_updates_same_major() {
         let args = Args {
             path: None,
+            global: false,
             update: false,
             minor: false,
             force_latest: false,
@@ -339,6 +342,7 @@ mod tests {
     fn test_minor_flag_pinned_updates_same_major() {
         let args = Args {
             path: None,
+            global: false,
             update: false,
             minor: true,
             force_latest: false,
@@ -365,6 +369,7 @@ mod tests {
     fn test_force_latest_flag_all_update_to_latest() {
         let args = Args {
             path: None,
+            global: false,
             update: false,
             minor: false,
             force_latest: true,
@@ -388,6 +393,7 @@ mod tests {
     fn test_caret_constraint_same_major() {
         let args = Args {
             path: None,
+            global: false,
             update: false,
             minor: false,
             force_latest: false,
@@ -408,6 +414,7 @@ mod tests {
     fn test_no_update_when_already_latest() {
         let args = Args {
             path: None,
+            global: false,
             update: false,
             minor: false,
             force_latest: false,
@@ -430,6 +437,7 @@ mod tests {
         // Should suggest updating constraint to >=1.25.0 (not >=0.9.1 which would be wrong)
         let args = Args {
             path: None,
+            global: false,
             update: false,
             minor: false,
             force_latest: false,
@@ -462,6 +470,7 @@ mod tests {
         // Should suggest updating to >=1.25.0
         let args = Args {
             path: None,
+            global: false,
             update: false,
             minor: false,
             force_latest: false,

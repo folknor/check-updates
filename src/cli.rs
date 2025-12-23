@@ -7,8 +7,12 @@ use std::path::PathBuf;
 #[command(author, version, about, long_about = None)]
 pub struct Args {
     /// Path to project directory (defaults to current directory)
-    #[arg(value_name = "PATH")]
+    #[arg(value_name = "PATH", conflicts_with = "global")]
     pub path: Option<PathBuf>,
+
+    /// Check globally installed packages (uv tools, pipx, pip --user)
+    #[arg(short, long)]
+    pub global: bool,
 
     /// Apply updates to dependency files
     #[arg(short, long)]

@@ -163,7 +163,7 @@ impl PyPiClient {
         &self,
         names: &[String],
         progress_callback: impl Fn(usize, usize) + Send + Sync + 'static,
-    ) -> Result<HashMap<String, PackageInfo>> {
+    ) -> Result<GetPackagesResult> {
         let total = names.len();
         let progress_callback = Arc::new(progress_callback);
 
@@ -194,40 +194,52 @@ impl PyPiClient {
         }
 
         // Wait for all tasks to complete
-        let mut results = HashMap::new();
+        let mut packages = HashMap::new();
         let mut errors = Vec::new();
 
         for task in tasks {
             match task.await {
                 Ok((name, Ok(package_info))) => {
-                    results.insert(name, package_info);
+                    packages.insert(name, package_info);
                 }
                 Ok((name, Err(e))) => {
-                    errors.push(format!("Failed to fetch '{}': {}", name, e));
+                    // Extract just the error message without "Failed to fetch" prefix
+                    let error_msg = e.to_string();
+                    errors.push((name, error_msg));
                 }
                 Err(e) => {
-                    errors.push(format!("Task failed: {}", e));
+                    errors.push(("unknown".to_string(), format!("Task failed: {}", e)));
                 }
             }
         }
 
+        // Format errors as strings
+        let formatted_errors: Vec<String> = errors
+            .into_iter()
+            .map(|(name, msg)| format!("{}: {}", name, msg))
+            .collect();
+
         // If we have some results, return them even if some packages failed
-        if !results.is_empty() {
-            // Log errors but don't fail completely
-            for error in errors {
-                eprintln!("Warning: {}", error);
-            }
-            Ok(results)
-        } else if !errors.is_empty() {
+        if !packages.is_empty() || formatted_errors.is_empty() {
+            Ok(GetPackagesResult {
+                packages,
+                errors: formatted_errors,
+            })
+        } else {
             // All packages failed
             Err(anyhow!(
                 "Failed to fetch all packages:\n{}",
-                errors.join("\n")
+                formatted_errors.join("\n")
             ))
-        } else {
-            Err(anyhow!("No packages to fetch"))
         }
     }
+}
+
+/// Result of fetching multiple packages
+#[derive(Debug, Clone)]
+pub struct GetPackagesResult {
+    pub packages: HashMap<String, PackageInfo>,
+    pub errors: Vec<String>,
 }
 
 // Implement Clone for PyPiClient to support concurrent usage
@@ -286,7 +298,7 @@ mod tests {
         assert!(result.is_ok(), "Failed to fetch packages: {:?}", result.err());
 
         let results = result.unwrap();
-        assert!(!results.is_empty());
+        assert!(!results.packages.is_empty());
 
         // Verify progress callback was called
         let calls = progress_calls.load(std::sync::atomic::Ordering::SeqCst);
