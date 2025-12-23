@@ -131,18 +131,9 @@ async fn run_global_mode(args: &Args) -> Result<()> {
         }
     }
 
-    // 4. Display results
-    let has_updates = checks.iter().any(|c| c.has_update);
-
-    if !has_updates && fetch_errors.is_empty() {
-        println!("All global packages are up to date!");
-        return Ok(());
-    }
-
-    if has_updates {
-        let renderer = GlobalTableRenderer::new(true);
-        renderer.render(&checks);
-    }
+    // 4. Display results (renderer shows "All packages up to date." per section if needed)
+    let renderer = GlobalTableRenderer::new(true);
+    renderer.render(&checks);
 
     // 5. Print upgrade commands
     let commands = generate_upgrade_commands(&checks);

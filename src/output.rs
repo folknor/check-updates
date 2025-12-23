@@ -171,22 +171,16 @@ impl GlobalTableRenderer {
 
     /// Render the global results table grouped by source
     pub fn render(&self, checks: &[GlobalCheck]) {
-        // Filter to only show packages with updates
-        let checks_with_updates: Vec<&GlobalCheck> = checks
-            .iter()
-            .filter(|c| c.has_update)
-            .collect();
-
-        if checks_with_updates.is_empty() {
+        if checks.is_empty() {
             return;
         }
 
-        // Group by source, and for pip --user further group by Python version
+        // Group ALL checks by source (not just those with updates)
         let mut uv_checks: Vec<&GlobalCheck> = Vec::new();
         let mut pipx_checks: Vec<&GlobalCheck> = Vec::new();
         let mut pip_by_python: BTreeMap<String, Vec<&GlobalCheck>> = BTreeMap::new();
 
-        for check in &checks_with_updates {
+        for check in checks {
             match &check.package.source {
                 GlobalSource::Uv => uv_checks.push(check),
                 GlobalSource::Pipx => pipx_checks.push(check),
@@ -206,42 +200,51 @@ impl GlobalTableRenderer {
 
         let mut first_group = true;
 
-        // Render uv tools (with its own column widths)
+        // Render uv tools
         if !uv_checks.is_empty() {
             if !first_group {
                 println!();
             }
             first_group = false;
-            let widths = self.calculate_widths(&uv_checks);
-            self.render_group("uv tools:", &uv_checks, &widths);
+            self.render_group_or_uptodate("uv tools:", &uv_checks);
         }
 
-        // Render pipx (with its own column widths)
+        // Render pipx
         if !pipx_checks.is_empty() {
             if !first_group {
                 println!();
             }
             first_group = false;
-            let widths = self.calculate_widths(&pipx_checks);
-            self.render_group("pipx:", &pipx_checks, &widths);
+            self.render_group_or_uptodate("pipx:", &pipx_checks);
         }
 
-        // Render pip --user grouped by Python version (each group has its own widths)
+        // Render pip --user grouped by Python version
         for (py_version, pip_checks) in &pip_by_python {
             if !first_group {
                 println!();
             }
             first_group = false;
-            let widths = self.calculate_widths(pip_checks);
             let header = format!("pip --user (Python {}):", py_version);
-            self.render_group(&header, pip_checks, &widths);
+            self.render_group_or_uptodate(&header, pip_checks);
         }
     }
 
-    fn render_group(&self, header: &str, checks: &[&GlobalCheck], widths: &GlobalColumnWidths) {
-        // Print group header
+    /// Render a group, showing "All packages up to date." if no updates
+    fn render_group_or_uptodate(&self, header: &str, checks: &[&GlobalCheck]) {
+        // Filter to only those with updates
+        let updates: Vec<&GlobalCheck> = checks.iter().filter(|c| c.has_update).copied().collect();
+
         println!("{}", header);
 
+        if updates.is_empty() {
+            println!("  All packages up to date.");
+        } else {
+            let widths = self.calculate_widths(&updates);
+            self.render_group_rows(&updates, &widths);
+        }
+    }
+
+    fn render_group_rows(&self, checks: &[&GlobalCheck], widths: &GlobalColumnWidths) {
         // Print column headers (indented)
         println!(
             "  {:<pkg_w$}  {:>inst_w$}  {:>latest_w$}",
