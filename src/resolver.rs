@@ -68,13 +68,18 @@ impl DependencyResolver {
         let latest = package_info.latest.clone();
 
         // Calculate "in range" - latest version that satisfies the constraint
-        // For unbounded specs, this means same major version
-        let in_range = self.calculate_in_range(&dependency.version_spec, &package_info.versions);
+        // For unbounded specs, this means same major version (considering installed version)
+        let in_range = self.calculate_in_range(
+            &dependency.version_spec,
+            &package_info.versions,
+            installed,
+        );
 
         // Calculate latest version with same major (for -m flag)
         let latest_same_major = self.calculate_latest_same_major(
             &dependency.version_spec,
             &package_info.versions,
+            installed,
         );
 
         // Calculate what version spec to update to
@@ -83,6 +88,7 @@ impl DependencyResolver {
             &in_range,
             &latest,
             &latest_same_major,
+            installed,
         );
 
         DependencyCheck {
@@ -95,25 +101,41 @@ impl DependencyResolver {
     }
 
     /// Calculate the latest version with the same major version
+    /// For unbounded specs, considers the installed version's major if higher
     fn calculate_latest_same_major(
         &self,
         spec: &VersionSpec,
         available_versions: &[Version],
+        installed: Option<&Version>,
     ) -> Option<Version> {
         let base = spec.base_version()?;
 
+        // For unbounded specs, use the installed version's major if it's higher
+        let target_major = match spec {
+            VersionSpec::Minimum(_) | VersionSpec::GreaterThan(_) => {
+                if let Some(inst) = installed {
+                    base.major.max(inst.major)
+                } else {
+                    base.major
+                }
+            }
+            _ => base.major,
+        };
+
         available_versions
             .iter()
-            .filter(|v| v.major == base.major)
+            .filter(|v| v.major == target_major)
             .max()
             .cloned()
     }
 
     /// Calculate the latest version "in range" for the constraint
+    /// For unbounded specs (>=X.Y.Z), considers installed version to determine target major
     fn calculate_in_range(
         &self,
         spec: &VersionSpec,
         available_versions: &[Version],
+        installed: Option<&Version>,
     ) -> Option<Version> {
         // Filter versions based on the spec's constraints
         let max_major = spec.max_major();
@@ -127,9 +149,17 @@ impl DependencyResolver {
                 }
 
                 // For unbounded specs (Minimum), limit to same major version
+                // but consider installed version if it's on a higher major
                 match spec {
                     VersionSpec::Minimum(base) | VersionSpec::GreaterThan(base) => {
-                        v.major == base.major
+                        // If installed version exists and is on a higher major,
+                        // use that major for "in range" calculation
+                        let target_major = if let Some(inst) = installed {
+                            base.major.max(inst.major)
+                        } else {
+                            base.major
+                        };
+                        v.major == target_major
                     }
                     _ => {
                         // For other specs, check against max_major if available
@@ -152,6 +182,7 @@ impl DependencyResolver {
         in_range: &Option<Version>,
         latest: &Version,
         latest_same_major: &Option<Version>,
+        installed: Option<&Version>,
     ) -> Option<VersionSpec> {
         // Handle pinned versions specially
         if let VersionSpec::Pinned(current_version) = current_spec {
@@ -194,6 +225,13 @@ impl DependencyResolver {
 
         if !needs_update {
             return None;
+        }
+
+        // Don't suggest updates that would be downgrades from installed version
+        if let Some(inst) = installed {
+            if target_version < inst {
+                return None;
+            }
         }
 
         Some(current_spec.with_version(target_version))
@@ -384,5 +422,68 @@ mod tests {
 
         // Already at latest in range, no update
         assert!(result.update_to.is_none());
+    }
+
+    #[test]
+    fn test_unbounded_spec_with_higher_installed_version() {
+        // Test case: spec is >=0.1.0 but installed is 1.25.0
+        // Should suggest updating constraint to >=1.25.0 (not >=0.9.1 which would be wrong)
+        let args = Args {
+            path: None,
+            update: false,
+            minor: false,
+            force_latest: false,
+            pre_release: false,
+        };
+        let resolver = DependencyResolver::new(args);
+
+        let dep = create_test_dependency("mcp", ">=0.1.0");
+        // Available: 0.1.0, 0.5.0, 0.9.1, 1.0.0, 1.20.0, 1.25.0
+        let pkg_info = create_package_info(
+            "mcp",
+            vec!["0.1.0", "0.5.0", "0.9.1", "1.0.0", "1.20.0", "1.25.0"],
+        );
+
+        // Installed version is 1.25.0 (from lock file)
+        let installed = Version::from_str("1.25.0").unwrap();
+        let result = resolver.resolve(&dep, &pkg_info, Some(&installed));
+
+        // in_range should be 1.25.0 (latest in same major as installed)
+        assert_eq!(result.in_range.as_ref().unwrap().to_string(), "1.25.0");
+
+        // Should suggest updating constraint from >=0.1.0 to >=1.25.0
+        assert!(result.update_to.is_some());
+        assert_eq!(result.update_to.unwrap().to_string(), ">=1.25.0");
+    }
+
+    #[test]
+    fn test_unbounded_spec_with_higher_installed_but_newer_available() {
+        // Test case: spec is >=0.1.0, installed is 1.20.0, latest is 1.25.0
+        // Should suggest updating to >=1.25.0
+        let args = Args {
+            path: None,
+            update: false,
+            minor: false,
+            force_latest: false,
+            pre_release: false,
+        };
+        let resolver = DependencyResolver::new(args);
+
+        let dep = create_test_dependency("mcp", ">=0.1.0");
+        let pkg_info = create_package_info(
+            "mcp",
+            vec!["0.1.0", "0.5.0", "0.9.1", "1.0.0", "1.20.0", "1.25.0"],
+        );
+
+        // Installed version is 1.20.0
+        let installed = Version::from_str("1.20.0").unwrap();
+        let result = resolver.resolve(&dep, &pkg_info, Some(&installed));
+
+        // in_range should be 1.25.0 (latest in major 1.x)
+        assert_eq!(result.in_range.as_ref().unwrap().to_string(), "1.25.0");
+
+        // Should suggest updating to >=1.25.0
+        assert!(result.update_to.is_some());
+        assert_eq!(result.update_to.unwrap().to_string(), ">=1.25.0");
     }
 }

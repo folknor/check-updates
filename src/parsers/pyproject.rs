@@ -177,6 +177,37 @@ impl PyProjectParser {
         Ok(dependencies)
     }
 
+    /// Parse PEP 735 dependency-groups format
+    fn parse_dependency_groups(
+        &self,
+        toml_value: &Value,
+        path: &PathBuf,
+        content: &str,
+    ) -> Result<Vec<Dependency>> {
+        let mut dependencies = Vec::new();
+
+        // Parse [dependency-groups] - tables of arrays
+        if let Some(groups) = toml_value
+            .get("dependency-groups")
+            .and_then(|d| d.as_table())
+        {
+            for (_group_name, deps_value) in groups {
+                if let Some(deps) = deps_value.as_array() {
+                    for dep_value in deps {
+                        if let Some(dep_str) = dep_value.as_str() {
+                            if let Some(dep) = self.parse_dependency_string(dep_str, path, content)
+                            {
+                                dependencies.push(dep);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(dependencies)
+    }
+
     /// Parse a Poetry dependency entry which can be a string or inline table
     fn parse_poetry_dependency(
         &self,
@@ -328,6 +359,11 @@ impl DependencyParser for PyProjectParser {
 
         // PDM format
         if let Ok(deps) = self.parse_pdm_dependencies(&toml_value, path, &content) {
+            all_dependencies.extend(deps);
+        }
+
+        // PEP 735 dependency-groups format
+        if let Ok(deps) = self.parse_dependency_groups(&toml_value, path, &content) {
             all_dependencies.extend(deps);
         }
 
