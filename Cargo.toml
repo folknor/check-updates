@@ -1,0 +1,56 @@
+[package]
+name = "python-check-updates"
+version = "0.1.0"
+edition = "2021"
+description = "Check for outdated Python dependencies"
+license = "MIT"
+repository = "https://github.com/folk/python-check-updates"
+keywords = ["python", "dependencies", "pip", "uv", "conda"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "python-check-updates"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+serde_yaml = "0.9"
+
+# Version parsing
+semver = "1"
+
+# Terminal UI
+indicatif = "0.18"
+colored = "3"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Regex for parsing
+regex = "1"
+
+# Parallel iteration
+rayon = "1"
+
+# URL handling
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
+tokio-test = "0.4"
+wiremock = "0.6"
