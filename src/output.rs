@@ -1,5 +1,6 @@
 use crate::global::{GlobalCheck, GlobalSource};
 use crate::resolver::{DependencyCheck, UpdateSeverity};
+use crate::uv_python::UvPythonCheck;
 use colored::Colorize;
 use std::collections::BTreeMap;
 
@@ -310,5 +311,105 @@ impl GlobalTableRenderer {
             Some(UpdateSeverity::Patch) => text.green().to_string(),
             None => text.to_string(),
         }
+    }
+}
+
+/// Column widths for uv Python version table
+struct UvPythonColumnWidths {
+    series: usize,
+    installed: usize,
+    latest: usize,
+}
+
+/// Renders uv-managed Python version checks
+pub struct UvPythonTableRenderer {
+    show_colors: bool,
+}
+
+impl UvPythonTableRenderer {
+    pub fn new(show_colors: bool) -> Self {
+        Self { show_colors }
+    }
+
+    pub fn render(&self, checks: &[UvPythonCheck]) {
+        if checks.is_empty() {
+            return;
+        }
+
+        // Filter to only versions with updates
+        let updates: Vec<&UvPythonCheck> = checks.iter().filter(|c| c.has_update).collect();
+
+        println!("uv-managed Python installations:");
+
+        if updates.is_empty() {
+            println!("  All Python versions up to date.");
+            return;
+        }
+
+        // Calculate column widths
+        let widths = self.calculate_widths(&updates);
+
+        // Print header (indented like global renderer)
+        println!(
+            "  {:<series_w$}  {:>installed_w$}  {:>latest_w$}",
+            "Series",
+            "Installed",
+            "Latest",
+            series_w = widths.series,
+            installed_w = widths.installed,
+            latest_w = widths.latest,
+        );
+
+        // Print rows sorted by series
+        let mut sorted = updates.to_vec();
+        sorted.sort_by(|a, b| a.series.cmp(&b.series));
+
+        for check in sorted {
+            self.print_row(check, &widths);
+        }
+    }
+
+    fn calculate_widths(&self, checks: &[&UvPythonCheck]) -> UvPythonColumnWidths {
+        let mut widths = UvPythonColumnWidths {
+            series: "Series".len(),
+            installed: "Installed".len(),
+            latest: "Latest".len(),
+        };
+
+        for check in checks {
+            widths.series = widths.series.max(check.series.len());
+            widths.installed = widths
+                .installed
+                .max(check.installed_version.to_string().len());
+            widths.latest = widths.latest.max(check.latest_version.to_string().len());
+        }
+
+        widths
+    }
+
+    fn print_row(&self, check: &UvPythonCheck, widths: &UvPythonColumnWidths) {
+        let latest_str = check.latest_version.to_string();
+
+        // Color the latest version based on update type
+        let colored_latest = if self.show_colors {
+            if check.is_patch_update() {
+                latest_str.green().to_string()
+            } else {
+                // Minor/major update (rare for Python, but handle it)
+                latest_str.yellow().to_string()
+            }
+        } else {
+            latest_str
+        };
+
+        println!(
+            "  {:<series_w$}  {:>installed_w$}  {:>latest_w$}",
+            check.series,
+            check.installed_version.to_string(),
+            colored_latest,
+            series_w = widths.series,
+            installed_w = widths.installed,
+            latest_w = widths.latest,
+        );
     }
 }

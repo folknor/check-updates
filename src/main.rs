@@ -7,7 +7,7 @@ use python_check_updates::detector::ProjectDetector;
 use python_check_updates::global::{
     generate_upgrade_commands, GlobalCheck, GlobalPackageDiscovery, UpgradeCommand,
 };
-use python_check_updates::output::{GlobalTableRenderer, TableRenderer};
+use python_check_updates::output::{GlobalTableRenderer, TableRenderer, UvPythonTableRenderer};
 use python_check_updates::parsers::{
     CondaParser, DependencyParser, LockfileParser, PyProjectParser, RequirementsParser,
 };
@@ -15,6 +15,7 @@ use python_check_updates::pypi::PyPiClient;
 use python_check_updates::python::get_python_info;
 use python_check_updates::resolver::{DependencyCheck, DependencyResolver};
 use python_check_updates::updater::FileUpdater;
+use python_check_updates::uv_python::{generate_uv_python_upgrade_commands, UvPythonDiscovery};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -37,11 +38,13 @@ async fn run_global_mode(args: &Args) -> Result<()> {
         );
     }
 
-    // 1. Discover global packages and fetch Python info concurrently
+    // 1. Discover global packages, fetch Python info, and check uv Python versions concurrently
     let discovery = GlobalPackageDiscovery::new(args.pre_release);
-    let (packages, python_info) = tokio::join!(
+    let uv_python_discovery = UvPythonDiscovery::new();
+    let (packages, python_info, uv_python_checks) = tokio::join!(
         async { discovery.discover() },
-        get_python_info(true)
+        get_python_info(true),
+        async { uv_python_discovery.discover_and_check().await }
     );
 
     // Print Python version header
@@ -135,8 +138,23 @@ async fn run_global_mode(args: &Args) -> Result<()> {
     let renderer = GlobalTableRenderer::new(true);
     renderer.render(&checks);
 
+    // 4b. Display uv Python version checks
+    if let Ok(uv_checks) = &uv_python_checks {
+        if !uv_checks.is_empty() {
+            println!();
+            let uv_renderer = UvPythonTableRenderer::new(true);
+            uv_renderer.render(uv_checks);
+        }
+    }
+
     // 5. Print upgrade commands
-    let commands = generate_upgrade_commands(&checks);
+    let mut commands = generate_upgrade_commands(&checks);
+
+    // Add uv Python upgrade commands
+    if let Ok(uv_checks) = &uv_python_checks {
+        commands.extend(generate_uv_python_upgrade_commands(uv_checks));
+    }
+
     if !commands.is_empty() {
         println!();
         println!("To upgrade, run:\n");
