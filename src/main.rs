@@ -316,7 +316,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     let renderer = TableRenderer::new(true);
     renderer.render(&checks);
 
-    // 6. If --update, apply updates to files
+    // 6. If --update, apply updates to files; otherwise show hint
     if args.update {
         let updater = FileUpdater::new();
         let result = updater.apply_updates(&checks)?;
@@ -330,6 +330,9 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         }
 
         result.print_summary();
+    } else {
+        println!();
+        println!("Run {} to update dependency files.", "python-check-updates -u".cyan());
     }
 
     Ok(())
