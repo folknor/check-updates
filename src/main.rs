@@ -293,8 +293,8 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         println!();
     }
 
-    // 4. Resolve updates based on flags
-    let resolver = DependencyResolver::new(args.clone());
+    // 4. Resolve updates
+    let resolver = DependencyResolver::new();
     let mut checks: Vec<DependencyCheck> = Vec::new();
 
     for dependency in &all_dependencies {
@@ -305,21 +305,31 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         }
     }
 
-    // 5. Display results table
-    let has_updates = checks.iter().any(|c| c.has_update());
+    // 5. Deduplicate for display (same package with same target)
+    let mut seen: HashSet<String> = HashSet::new();
+    let deduplicated: Vec<&DependencyCheck> = checks
+        .iter()
+        .filter(|c| {
+            if !c.has_update() {
+                return false;
+            }
+            let key = format!(
+                "{}:{}",
+                c.dependency.name,
+                c.target.as_ref().map(|v| v.to_string()).unwrap_or_default()
+            );
+            seen.insert(key)
+        })
+        .collect();
 
-    if !has_updates {
-        println!("All dependencies are up to date!");
-        return Ok(());
-    }
-
+    // 6. Display results table
     let renderer = TableRenderer::new(true);
-    renderer.render(&checks);
+    renderer.render_deduped(&deduplicated);
 
-    // 6. If --update, apply updates to files; otherwise show hint
+    // 7. If --update, apply updates based on severity filter
     if args.update {
         let updater = FileUpdater::new();
-        let result = updater.apply_updates(&checks)?;
+        let result = updater.apply_updates(&checks, args.minor, args.force)?;
 
         println!();
         if !result.modified_files.is_empty() {
@@ -330,9 +340,14 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         }
 
         result.print_summary();
-    } else {
+    } else if !deduplicated.is_empty() {
         println!();
-        println!("Run {} to update dependency files.", "python-check-updates -u".cyan());
+        println!(
+            "Run {} to upgrade patch, {} to upgrade patch+minors, and {} to force upgrade all.",
+            "-u".cyan(),
+            "-um".cyan(),
+            "-uf".cyan()
+        );
     }
 
     Ok(())

@@ -14,17 +14,17 @@ pub struct Args {
     #[arg(short, long)]
     pub global: bool,
 
-    /// Apply updates to dependency files
+    /// Update dependency files (patch updates only by default)
     #[arg(short, long)]
     pub update: bool,
 
-    /// Upgrade pinned versions to latest minor (same major version)
+    /// Include minor updates (use with -u as -um)
     #[arg(short, long)]
     pub minor: bool,
 
-    /// Upgrade all dependencies to absolute latest (ignore version constraints)
+    /// Force update all to absolute latest (use with -u as -uf)
     #[arg(short, long)]
-    pub force_latest: bool,
+    pub force: bool,
 
     /// Include pre-release versions
     #[arg(short, long)]

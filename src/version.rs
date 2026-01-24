@@ -13,7 +13,7 @@ pub enum VersionError {
 }
 
 /// A parsed semantic version
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Version {
     pub major: u64,
     pub minor: u64,
@@ -23,6 +23,17 @@ pub struct Version {
     /// Original string representation
     pub original: String,
 }
+
+impl PartialEq for Version {
+    fn eq(&self, other: &Self) -> bool {
+        self.major == other.major
+            && self.minor == other.minor
+            && self.patch == other.patch
+            && self.pre_release == other.pre_release
+    }
+}
+
+impl Eq for Version {}
 
 impl Version {
     pub fn new(major: u64, minor: u64, patch: u64) -> Self {

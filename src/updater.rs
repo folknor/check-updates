@@ -1,4 +1,4 @@
-use crate::resolver::DependencyCheck;
+use crate::resolver::{DependencyCheck, UpdateSeverity};
 use crate::detector::PackageManager;
 use anyhow::{Context, Result};
 use std::collections::{HashSet, HashMap};
@@ -13,20 +13,42 @@ impl FileUpdater {
         Self
     }
 
-    /// Apply updates to dependency files
-    pub fn apply_updates(&self, checks: &[DependencyCheck]) -> Result<UpdateResult> {
+    /// Apply updates to dependency files based on severity filter
+    /// - include_minor: false = patch only, true = patch + minor
+    /// - force: true = all severities AND use absolute latest version
+    pub fn apply_updates(
+        &self,
+        checks: &[DependencyCheck],
+        include_minor: bool,
+        force: bool,
+    ) -> Result<UpdateResult> {
         let mut modified_files = HashSet::new();
         let mut package_file_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
         let mut package_managers = HashSet::new();
 
-        // Group checks by file
-        let mut file_updates: HashMap<PathBuf, Vec<&DependencyCheck>> = HashMap::new();
+        // Group checks by file, filtering by severity
+        let mut file_updates: HashMap<PathBuf, Vec<(&DependencyCheck, String)>> = HashMap::new();
+
         for check in checks {
-            if check.has_update() {
+            // Determine which version spec to use
+            let version_spec = if force {
+                // Force mode: use absolute latest for all packages
+                check.force_spec.as_ref()
+            } else {
+                // Normal mode: filter by severity and use target_spec
+                match check.severity {
+                    Some(UpdateSeverity::Patch) => check.target_spec.as_ref(),
+                    Some(UpdateSeverity::Minor) if include_minor => check.target_spec.as_ref(),
+                    _ => None, // Skip major updates and minor (if not included)
+                }
+            };
+
+            if let Some(spec) = version_spec {
+                let new_version = spec.to_string();
                 file_updates
                     .entry(check.dependency.source_file.clone())
-                    .or_insert_with(Vec::new)
-                    .push(check);
+                    .or_default()
+                    .push((check, new_version));
 
                 // Track which packages appear in which files
                 package_file_map
@@ -38,7 +60,7 @@ impl FileUpdater {
 
         // Update each file
         for (file_path, updates) in file_updates {
-            self.update_file(&file_path, updates)
+            self.update_file(&file_path, &updates)
                 .with_context(|| format!("Failed to update file: {}", file_path.display()))?;
 
             modified_files.insert(file_path.clone());
@@ -71,7 +93,7 @@ impl FileUpdater {
     }
 
     /// Update a single file with the given dependency updates
-    fn update_file(&self, file_path: &PathBuf, updates: Vec<&DependencyCheck>) -> Result<()> {
+    fn update_file(&self, file_path: &PathBuf, updates: &[(&DependencyCheck, String)]) -> Result<()> {
         // Read the entire file
         let content = fs::read_to_string(file_path)
             .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
@@ -79,12 +101,12 @@ impl FileUpdater {
         let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
 
         // Sort updates by line number in descending order to avoid offset issues
-        let mut sorted_updates = updates;
-        sorted_updates.sort_by(|a, b| b.dependency.line_number.cmp(&a.dependency.line_number));
+        let mut sorted_updates: Vec<_> = updates.iter().collect();
+        sorted_updates.sort_by(|a, b| b.0.dependency.line_number.cmp(&a.0.dependency.line_number));
 
         // Apply each update
-        for update in sorted_updates {
-            let line_idx = update.dependency.line_number.saturating_sub(1);
+        for (check, new_version) in sorted_updates {
+            let line_idx = check.dependency.line_number.saturating_sub(1);
 
             if line_idx >= lines.len() {
                 continue; // Skip if line number is out of bounds
@@ -92,18 +114,15 @@ impl FileUpdater {
 
             let original_line = &lines[line_idx];
 
-            // Get the new version spec
-            if let Some(new_spec) = &update.update_to {
-                let updated_line = self.replace_version_in_line(
-                    original_line,
-                    &update.dependency.name,
-                    &update.dependency.version_spec.to_string(),
-                    &new_spec.to_string(),
-                    file_path,
-                )?;
+            let updated_line = self.replace_version_in_line(
+                original_line,
+                &check.dependency.name,
+                &check.dependency.version_spec.to_string(),
+                new_version,
+                file_path,
+            )?;
 
-                lines[line_idx] = updated_line;
-            }
+            lines[line_idx] = updated_line;
         }
 
         // Write the file back
@@ -446,37 +465,47 @@ mod tests {
         let temp_path = temp_file.path().to_path_buf();
 
         // Create mock dependency checks
-        let checks = vec![
-            DependencyCheck {
-                dependency: Dependency {
-                    name: "requests".to_string(),
-                    version_spec: VersionSpec::Pinned(Version::new(2, 28, 0)),
-                    source_file: temp_path.clone(),
-                    line_number: 1,
-                    original_line: "requests==2.28.0".to_string(),
-                },
-                installed: Some(Version::new(2, 28, 0)),
-                in_range: Some(Version::new(2, 32, 3)),
-                latest: Version::new(2, 32, 3),
-                update_to: Some(VersionSpec::Pinned(Version::new(2, 32, 3))),
+        let check1 = DependencyCheck {
+            dependency: Dependency {
+                name: "requests".to_string(),
+                version_spec: VersionSpec::Pinned(Version::new(2, 28, 0)),
+                source_file: temp_path.clone(),
+                line_number: 1,
+                original_line: "requests==2.28.0".to_string(),
             },
-            DependencyCheck {
-                dependency: Dependency {
-                    name: "flask".to_string(),
-                    version_spec: VersionSpec::Pinned(Version::new(2, 0, 3)),
-                    source_file: temp_path.clone(),
-                    line_number: 3,
-                    original_line: "flask==2.0.3".to_string(),
-                },
-                installed: Some(Version::new(2, 0, 3)),
-                in_range: Some(Version::new(2, 3, 3)),
-                latest: Version::new(2, 3, 3),
-                update_to: Some(VersionSpec::Pinned(Version::new(2, 3, 3))),
+            installed: Some(Version::new(2, 28, 0)),
+            in_range: Some(Version::new(2, 32, 3)),
+            latest: Version::new(2, 32, 3),
+            target: Some(Version::new(2, 32, 3)),
+            target_spec: Some(VersionSpec::Pinned(Version::new(2, 32, 3))),
+            severity: Some(UpdateSeverity::Minor),
+            force_spec: Some(VersionSpec::Pinned(Version::new(2, 32, 3))),
+        };
+        let check2 = DependencyCheck {
+            dependency: Dependency {
+                name: "flask".to_string(),
+                version_spec: VersionSpec::Pinned(Version::new(2, 0, 3)),
+                source_file: temp_path.clone(),
+                line_number: 3,
+                original_line: "flask==2.0.3".to_string(),
             },
+            installed: Some(Version::new(2, 0, 3)),
+            in_range: Some(Version::new(2, 3, 3)),
+            latest: Version::new(2, 3, 3),
+            target: Some(Version::new(2, 3, 3)),
+            target_spec: Some(VersionSpec::Pinned(Version::new(2, 3, 3))),
+            severity: Some(UpdateSeverity::Minor),
+            force_spec: Some(VersionSpec::Pinned(Version::new(2, 3, 3))),
+        };
+
+        // Create updates with version strings
+        let updates: Vec<(&DependencyCheck, String)> = vec![
+            (&check1, "==2.32.3".to_string()),
+            (&check2, "==2.3.3".to_string()),
         ];
 
         // Apply updates
-        updater.update_file(&temp_path, checks.iter().collect())?;
+        updater.update_file(&temp_path, &updates)?;
 
         // Read the updated file
         let updated_content = fs::read_to_string(&temp_path)?;
@@ -486,6 +515,120 @@ mod tests {
         assert_eq!(lines[0], "requests==2.32.3");
         assert_eq!(lines[1], "numpy>=1.24.0,<2.0.0"); // Unchanged
         assert_eq!(lines[2], "flask==2.3.3");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_patch_only() -> Result<()> {
+        use crate::parsers::Dependency;
+        use crate::version::{Version, VersionSpec};
+
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "serde==1.0.0")?;
+        writeln!(file, "tokio==1.0.0")?;
+        file.flush()?;
+
+        let temp_path = file.path().to_path_buf();
+
+        let checks = vec![
+            DependencyCheck {
+                dependency: Dependency {
+                    name: "serde".to_string(),
+                    version_spec: VersionSpec::Pinned(Version::new(1, 0, 0)),
+                    source_file: temp_path.clone(),
+                    line_number: 1,
+                    original_line: "serde==1.0.0".to_string(),
+                },
+                installed: Some(Version::new(1, 0, 0)),
+                in_range: Some(Version::new(1, 0, 200)),
+                latest: Version::new(1, 0, 200),
+                target: Some(Version::new(1, 0, 200)),
+                target_spec: Some(VersionSpec::Pinned(Version::new(1, 0, 200))),
+                severity: Some(UpdateSeverity::Patch),
+                force_spec: Some(VersionSpec::Pinned(Version::new(1, 0, 200))),
+            },
+            DependencyCheck {
+                dependency: Dependency {
+                    name: "tokio".to_string(),
+                    version_spec: VersionSpec::Pinned(Version::new(1, 0, 0)),
+                    source_file: temp_path.clone(),
+                    line_number: 2,
+                    original_line: "tokio==1.0.0".to_string(),
+                },
+                installed: Some(Version::new(1, 0, 0)),
+                in_range: Some(Version::new(1, 5, 0)),
+                latest: Version::new(1, 5, 0),
+                target: Some(Version::new(1, 5, 0)),
+                target_spec: Some(VersionSpec::Pinned(Version::new(1, 5, 0))),
+                severity: Some(UpdateSeverity::Minor),
+                force_spec: Some(VersionSpec::Pinned(Version::new(1, 5, 0))),
+            },
+        ];
+
+        let updater = FileUpdater::new();
+        updater.apply_updates(&checks, false, false)?; // patch only
+
+        let content = fs::read_to_string(&temp_path)?;
+        assert!(content.contains("==1.0.200"), "serde should be updated: {}", content);
+        assert!(!content.contains("==1.5.0"), "tokio should NOT be updated: {}", content);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_patch_and_minor() -> Result<()> {
+        use crate::parsers::Dependency;
+        use crate::version::{Version, VersionSpec};
+
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "serde==1.0.0")?;
+        writeln!(file, "tokio==1.0.0")?;
+        file.flush()?;
+
+        let temp_path = file.path().to_path_buf();
+
+        let checks = vec![
+            DependencyCheck {
+                dependency: Dependency {
+                    name: "serde".to_string(),
+                    version_spec: VersionSpec::Pinned(Version::new(1, 0, 0)),
+                    source_file: temp_path.clone(),
+                    line_number: 1,
+                    original_line: "serde==1.0.0".to_string(),
+                },
+                installed: Some(Version::new(1, 0, 0)),
+                in_range: Some(Version::new(1, 0, 200)),
+                latest: Version::new(1, 0, 200),
+                target: Some(Version::new(1, 0, 200)),
+                target_spec: Some(VersionSpec::Pinned(Version::new(1, 0, 200))),
+                severity: Some(UpdateSeverity::Patch),
+                force_spec: Some(VersionSpec::Pinned(Version::new(1, 0, 200))),
+            },
+            DependencyCheck {
+                dependency: Dependency {
+                    name: "tokio".to_string(),
+                    version_spec: VersionSpec::Pinned(Version::new(1, 0, 0)),
+                    source_file: temp_path.clone(),
+                    line_number: 2,
+                    original_line: "tokio==1.0.0".to_string(),
+                },
+                installed: Some(Version::new(1, 0, 0)),
+                in_range: Some(Version::new(1, 5, 0)),
+                latest: Version::new(1, 5, 0),
+                target: Some(Version::new(1, 5, 0)),
+                target_spec: Some(VersionSpec::Pinned(Version::new(1, 5, 0))),
+                severity: Some(UpdateSeverity::Minor),
+                force_spec: Some(VersionSpec::Pinned(Version::new(1, 5, 0))),
+            },
+        ];
+
+        let updater = FileUpdater::new();
+        updater.apply_updates(&checks, true, false)?; // patch + minor
+
+        let content = fs::read_to_string(&temp_path)?;
+        assert!(content.contains("==1.0.200"), "serde should be updated: {}", content);
+        assert!(content.contains("==1.5.0"), "tokio should be updated: {}", content);
 
         Ok(())
     }

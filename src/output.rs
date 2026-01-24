@@ -4,17 +4,7 @@ use crate::uv_python::UvPythonCheck;
 use colored::Colorize;
 use std::collections::BTreeMap;
 
-/// Column widths for table layout
-struct ColumnWidths {
-    package: usize,
-    defined: usize,
-    installed: usize,
-    in_range: usize,
-    latest: usize,
-    update_to: usize,
-}
-
-/// Renders the dependency check results as a table
+/// Renders the dependency check results in a simple format
 pub struct TableRenderer {
     show_colors: bool,
 }
@@ -24,140 +14,118 @@ impl TableRenderer {
         Self { show_colors }
     }
 
-    /// Render the results table
+    /// Render all packages with updates
     pub fn render(&self, checks: &[DependencyCheck]) {
-        // Filter to only show rows with updates
         let checks_with_updates: Vec<&DependencyCheck> = checks
             .iter()
             .filter(|check| check.has_update())
             .collect();
 
-        if checks_with_updates.is_empty() {
+        self.render_deduped(&checks_with_updates);
+    }
+
+    /// Render a deduplicated list of checks
+    pub fn render_deduped(&self, checks: &[&DependencyCheck]) {
+        if checks.is_empty() {
+            println!("All dependencies are up to date!");
             return;
         }
 
         // Calculate column widths
-        let widths = self.calculate_widths(&checks_with_updates);
+        let max_name = checks
+            .iter()
+            .map(|c| c.dependency.name.len())
+            .max()
+            .unwrap_or(0);
 
-        // Print header
-        self.print_header(&widths);
+        let max_from = checks
+            .iter()
+            .filter_map(|c| c.current_version())
+            .map(|v| v.to_string().len())
+            .max()
+            .unwrap_or(0);
 
-        // Print each row
-        for check in checks_with_updates {
-            self.print_row(check, &widths);
-        }
-    }
+        let max_to = checks
+            .iter()
+            .filter_map(|c| c.target.as_ref())
+            .map(|v| v.to_string().len())
+            .max()
+            .unwrap_or(0);
 
-    /// Calculate the maximum width needed for each column
-    fn calculate_widths(&self, checks: &[&DependencyCheck]) -> ColumnWidths {
-        let mut widths = ColumnWidths {
-            package: "Package".len(),
-            defined: "Defined".len(),
-            installed: "Installed".len(),
-            in_range: "In Range".len(),
-            latest: "Latest".len(),
-            update_to: "Update To".len(),
-        };
+        println!("Outdated dependencies:\n");
 
         for check in checks {
-            widths.package = widths.package.max(check.dependency.name.len());
-            widths.defined = widths.defined.max(check.dependency.version_spec.to_string().len());
-
-            let installed_str = check.installed.as_ref()
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            widths.installed = widths.installed.max(installed_str.len());
-
-            let in_range_str = check.in_range.as_ref()
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            widths.in_range = widths.in_range.max(in_range_str.len());
-
-            widths.latest = widths.latest.max(check.latest.to_string().len());
-
-            let update_to_str = check.update_to.as_ref()
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            widths.update_to = widths.update_to.max(update_to_str.len());
+            self.print_row(check, max_name, max_from, max_to);
         }
-
-        widths
     }
 
-    /// Print the header
-    fn print_header(&self, widths: &ColumnWidths) {
+    fn print_row(
+        &self,
+        check: &DependencyCheck,
+        name_width: usize,
+        from_width: usize,
+        to_width: usize,
+    ) {
+        let from = check
+            .current_version()
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+
+        let to = check
+            .target
+            .as_ref()
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+
+        let severity_str = match check.severity {
+            Some(UpdateSeverity::Major) => {
+                if self.show_colors {
+                    "MAJOR".red().to_string()
+                } else {
+                    "MAJOR".to_string()
+                }
+            }
+            Some(UpdateSeverity::Minor) => {
+                if self.show_colors {
+                    "minor".yellow().to_string()
+                } else {
+                    "minor".to_string()
+                }
+            }
+            Some(UpdateSeverity::Patch) => {
+                if self.show_colors {
+                    "patch".green().to_string()
+                } else {
+                    "patch".to_string()
+                }
+            }
+            None => "".to_string(),
+        };
+
+        // Show "(X available)" if there's a newer version beyond the target
+        let available_hint = if check.has_newer_available() {
+            let hint = format!("  ({} available)", check.latest);
+            if self.show_colors {
+                hint.dimmed().to_string()
+            } else {
+                hint
+            }
+        } else {
+            String::new()
+        };
+
         println!(
-            "{:<package_w$}  {:>defined_w$}  {:>installed_w$}  {:>in_range_w$}  {:>latest_w$}  {:>update_to_w$}",
-            "Package",
-            "Defined",
-            "Installed",
-            "In Range",
-            "Latest",
-            "Update To",
-            package_w = widths.package,
-            defined_w = widths.defined,
-            installed_w = widths.installed,
-            in_range_w = widths.in_range,
-            latest_w = widths.latest,
-            update_to_w = widths.update_to,
-        );
-    }
-
-    /// Print a single row
-    fn print_row(&self, check: &DependencyCheck, widths: &ColumnWidths) {
-        let installed = check.installed.as_ref()
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "-".to_string());
-
-        let in_range = check.in_range.as_ref()
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "-".to_string());
-
-        let update_to = check.update_to.as_ref()
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "-".to_string());
-
-        // Get severity for coloring the update_to column
-        let severity = check.update_severity();
-        let colored_update = self.colorize(&update_to, severity);
-
-        println!(
-            "{:<package_w$}  {:>defined_w$}  {:>installed_w$}  {:>in_range_w$}  {:>latest_w$}  {:>update_to_w$}",
+            "  {:<name_w$}  {:>from_w$} → {:<to_w$}  {:<5}{}",
             check.dependency.name,
-            check.dependency.version_spec.to_string(),
-            installed,
-            in_range,
-            check.latest.to_string(),
-            colored_update,
-            package_w = widths.package,
-            defined_w = widths.defined,
-            installed_w = widths.installed,
-            in_range_w = widths.in_range,
-            latest_w = widths.latest,
-            update_to_w = widths.update_to,
+            from,
+            to,
+            severity_str,
+            available_hint,
+            name_w = name_width,
+            from_w = from_width,
+            to_w = to_width,
         );
     }
-
-    /// Colorize text based on update severity
-    fn colorize(&self, text: &str, severity: Option<UpdateSeverity>) -> String {
-        if !self.show_colors {
-            return text.to_string();
-        }
-
-        match severity {
-            Some(UpdateSeverity::Major) => text.red().to_string(),
-            Some(UpdateSeverity::Minor) => text.yellow().to_string(),
-            Some(UpdateSeverity::Patch) => text.green().to_string(),
-            None => text.to_string(),
-        }
-    }
-}
-
-/// Column widths for global table layout (3 columns)
-struct GlobalColumnWidths {
-    package: usize,
-    installed: usize,
-    latest: usize,
 }
 
 /// Renders global package check results grouped by source
@@ -240,22 +208,23 @@ impl GlobalTableRenderer {
         if updates.is_empty() {
             println!("  All packages up to date.");
         } else {
-            let widths = self.calculate_widths(&updates);
-            self.render_group_rows(&updates, &widths);
+            self.render_group_rows(&updates);
         }
     }
 
-    fn render_group_rows(&self, checks: &[&GlobalCheck], widths: &GlobalColumnWidths) {
-        // Print column headers (indented)
-        println!(
-            "  {:<pkg_w$}  {:>inst_w$}  {:>latest_w$}",
-            "Package",
-            "Installed",
-            "Latest",
-            pkg_w = widths.package,
-            inst_w = widths.installed,
-            latest_w = widths.latest,
-        );
+    fn render_group_rows(&self, checks: &[&GlobalCheck]) {
+        // Calculate widths
+        let max_name = checks.iter().map(|c| c.package.name.len()).max().unwrap_or(0);
+        let max_installed = checks
+            .iter()
+            .map(|c| c.package.installed_version.to_string().len())
+            .max()
+            .unwrap_or(0);
+        let max_latest = checks
+            .iter()
+            .map(|c| c.latest.to_string().len())
+            .max()
+            .unwrap_or(0);
 
         // Sort checks by package name
         let mut sorted_checks = checks.to_vec();
@@ -263,62 +232,43 @@ impl GlobalTableRenderer {
 
         // Print each row (indented)
         for check in sorted_checks {
-            self.print_row(check, widths);
+            let severity_str = match check.update_severity() {
+                Some(UpdateSeverity::Major) => {
+                    if self.show_colors {
+                        "MAJOR".red().to_string()
+                    } else {
+                        "MAJOR".to_string()
+                    }
+                }
+                Some(UpdateSeverity::Minor) => {
+                    if self.show_colors {
+                        "minor".yellow().to_string()
+                    } else {
+                        "minor".to_string()
+                    }
+                }
+                Some(UpdateSeverity::Patch) => {
+                    if self.show_colors {
+                        "patch".green().to_string()
+                    } else {
+                        "patch".to_string()
+                    }
+                }
+                None => "".to_string(),
+            };
+
+            println!(
+                "  {:<name_w$}  {:>inst_w$} → {:<to_w$}  {}",
+                check.package.name,
+                check.package.installed_version.to_string(),
+                check.latest.to_string(),
+                severity_str,
+                name_w = max_name,
+                inst_w = max_installed,
+                to_w = max_latest,
+            );
         }
     }
-
-    fn calculate_widths(&self, checks: &[&GlobalCheck]) -> GlobalColumnWidths {
-        let mut widths = GlobalColumnWidths {
-            package: "Package".len(),
-            installed: "Installed".len(),
-            latest: "Latest".len(),
-        };
-
-        for check in checks {
-            widths.package = widths.package.max(check.package.name.len());
-            widths.installed = widths
-                .installed
-                .max(check.package.installed_version.to_string().len());
-            widths.latest = widths.latest.max(check.latest.to_string().len());
-        }
-
-        widths
-    }
-
-    fn print_row(&self, check: &GlobalCheck, widths: &GlobalColumnWidths) {
-        let latest_str = check.latest.to_string();
-        let colored_latest = self.colorize(&latest_str, check.update_severity());
-
-        println!(
-            "  {:<pkg_w$}  {:>inst_w$}  {:>latest_w$}",
-            check.package.name,
-            check.package.installed_version.to_string(),
-            colored_latest,
-            pkg_w = widths.package,
-            inst_w = widths.installed,
-            latest_w = widths.latest,
-        );
-    }
-
-    fn colorize(&self, text: &str, severity: Option<UpdateSeverity>) -> String {
-        if !self.show_colors {
-            return text.to_string();
-        }
-
-        match severity {
-            Some(UpdateSeverity::Major) => text.red().to_string(),
-            Some(UpdateSeverity::Minor) => text.yellow().to_string(),
-            Some(UpdateSeverity::Patch) => text.green().to_string(),
-            None => text.to_string(),
-        }
-    }
-}
-
-/// Column widths for uv Python version table
-struct UvPythonColumnWidths {
-    series: usize,
-    installed: usize,
-    latest: usize,
 }
 
 /// Renders uv-managed Python version checks
@@ -347,69 +297,41 @@ impl UvPythonTableRenderer {
         }
 
         // Calculate column widths
-        let widths = self.calculate_widths(&updates);
-
-        // Print header (indented like global renderer)
-        println!(
-            "  {:<series_w$}  {:>installed_w$}  {:>latest_w$}",
-            "Series",
-            "Installed",
-            "Latest",
-            series_w = widths.series,
-            installed_w = widths.installed,
-            latest_w = widths.latest,
-        );
+        let max_series = updates.iter().map(|c| c.series.len()).max().unwrap_or(0);
+        let max_installed = updates
+            .iter()
+            .map(|c| c.installed_version.to_string().len())
+            .max()
+            .unwrap_or(0);
 
         // Print rows sorted by series
         let mut sorted = updates.to_vec();
         sorted.sort_by(|a, b| a.series.cmp(&b.series));
 
         for check in sorted {
-            self.print_row(check, &widths);
-        }
-    }
-
-    fn calculate_widths(&self, checks: &[&UvPythonCheck]) -> UvPythonColumnWidths {
-        let mut widths = UvPythonColumnWidths {
-            series: "Series".len(),
-            installed: "Installed".len(),
-            latest: "Latest".len(),
-        };
-
-        for check in checks {
-            widths.series = widths.series.max(check.series.len());
-            widths.installed = widths
-                .installed
-                .max(check.installed_version.to_string().len());
-            widths.latest = widths.latest.max(check.latest_version.to_string().len());
-        }
-
-        widths
-    }
-
-    fn print_row(&self, check: &UvPythonCheck, widths: &UvPythonColumnWidths) {
-        let latest_str = check.latest_version.to_string();
-
-        // Color the latest version based on update type
-        let colored_latest = if self.show_colors {
-            if check.is_patch_update() {
-                latest_str.green().to_string()
+            let severity_str = if self.show_colors {
+                if check.is_patch_update() {
+                    "patch".green().to_string()
+                } else {
+                    "minor".yellow().to_string()
+                }
             } else {
-                // Minor/major update (rare for Python, but handle it)
-                latest_str.yellow().to_string()
-            }
-        } else {
-            latest_str
-        };
+                if check.is_patch_update() {
+                    "patch".to_string()
+                } else {
+                    "minor".to_string()
+                }
+            };
 
-        println!(
-            "  {:<series_w$}  {:>installed_w$}  {:>latest_w$}",
-            check.series,
-            check.installed_version.to_string(),
-            colored_latest,
-            series_w = widths.series,
-            installed_w = widths.installed,
-            latest_w = widths.latest,
-        );
+            println!(
+                "  {:<series_w$}  {:>inst_w$} → {}  {}",
+                check.series,
+                check.installed_version.to_string(),
+                check.latest_version.to_string(),
+                severity_str,
+                series_w = max_series,
+                inst_w = max_installed,
+            );
+        }
     }
 }

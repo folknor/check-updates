@@ -14,7 +14,7 @@ fn test_help_flag() {
         .stdout(predicate::str::contains("Check for outdated Python dependencies"))
         .stdout(predicate::str::contains("--update"))
         .stdout(predicate::str::contains("--minor"))
-        .stdout(predicate::str::contains("--force-latest"))
+        .stdout(predicate::str::contains("--force"))
         .stdout(predicate::str::contains("--pre-release"));
 }
 
@@ -151,14 +151,14 @@ fn test_minor_flag() {
         .success();
 }
 
-/// Test running with --force-latest flag
+/// Test running with --force flag
 #[test]
-fn test_force_latest_flag() {
+fn test_force_flag() {
     let project = common::create_temp_project_with_requirements();
 
     let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
     cmd.arg(project.path())
-        .arg("--force-latest")
+        .arg("--force")
         .assert()
         .success();
 }
