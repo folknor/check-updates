@@ -8,23 +8,10 @@ pub use lockfiles::LockfileParser;
 pub use pyproject::PyProjectParser;
 pub use requirements::RequirementsParser;
 
-use crate::version::VersionSpec;
-use std::path::PathBuf;
+// Re-export Dependency from core for use by parsers
+pub use check_updates_core::Dependency;
 
-/// A dependency as parsed from a file
-#[derive(Debug, Clone)]
-pub struct Dependency {
-    /// Package name (normalized to lowercase)
-    pub name: String,
-    /// Version specification as parsed
-    pub version_spec: VersionSpec,
-    /// Source file this dependency was found in
-    pub source_file: PathBuf,
-    /// Line number in the source file (1-indexed)
-    pub line_number: usize,
-    /// Original line text (for updating)
-    pub original_line: String,
-}
+use std::path::PathBuf;
 
 /// Trait for dependency file parsers
 pub trait DependencyParser {

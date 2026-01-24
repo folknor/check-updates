@@ -1,5 +1,5 @@
 use crate::global::UpgradeCommand;
-use crate::version::Version;
+use check_updates_core::Version;
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};

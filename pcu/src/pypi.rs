@@ -1,4 +1,4 @@
-use crate::version::Version;
+use check_updates_core::{PackageInfo, Version};
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -11,15 +11,6 @@ pub struct PyPiClient {
     client: reqwest::Client,
     base_url: String,
     include_prerelease: bool,
-}
-
-/// Package information from PyPI
-#[derive(Debug, Clone)]
-pub struct PackageInfo {
-    pub name: String,
-    pub versions: Vec<Version>,
-    pub latest: Version,
-    pub latest_stable: Option<Version>,
 }
 
 /// PyPI JSON API response structure

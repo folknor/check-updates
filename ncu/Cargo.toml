@@ -1,0 +1,18 @@
+[package]
+name = "ncu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Check for outdated npm dependencies"
+repository.workspace = true
+keywords = ["npm", "pnpm", "yarn", "bun", "dependencies"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "ncu"
+path = "src/main.rs"
+
+[dependencies]
+check-updates-core.workspace = true
+
+[dev-dependencies]

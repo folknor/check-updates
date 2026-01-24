@@ -1,132 +1,11 @@
 use crate::global::{GlobalCheck, GlobalSource};
-use crate::resolver::{DependencyCheck, UpdateSeverity};
 use crate::uv_python::UvPythonCheck;
+use check_updates_core::UpdateSeverity;
 use colored::Colorize;
 use std::collections::BTreeMap;
 
-/// Renders the dependency check results in a simple format
-pub struct TableRenderer {
-    show_colors: bool,
-}
-
-impl TableRenderer {
-    pub fn new(show_colors: bool) -> Self {
-        Self { show_colors }
-    }
-
-    /// Render all packages with updates
-    pub fn render(&self, checks: &[DependencyCheck]) {
-        let checks_with_updates: Vec<&DependencyCheck> = checks
-            .iter()
-            .filter(|check| check.has_update())
-            .collect();
-
-        self.render_deduped(&checks_with_updates);
-    }
-
-    /// Render a deduplicated list of checks
-    pub fn render_deduped(&self, checks: &[&DependencyCheck]) {
-        if checks.is_empty() {
-            println!("All dependencies are up to date!");
-            return;
-        }
-
-        // Calculate column widths
-        let max_name = checks
-            .iter()
-            .map(|c| c.dependency.name.len())
-            .max()
-            .unwrap_or(0);
-
-        let max_from = checks
-            .iter()
-            .filter_map(|c| c.current_version())
-            .map(|v| v.to_string().len())
-            .max()
-            .unwrap_or(0);
-
-        let max_to = checks
-            .iter()
-            .filter_map(|c| c.target.as_ref())
-            .map(|v| v.to_string().len())
-            .max()
-            .unwrap_or(0);
-
-        println!("Outdated dependencies:\n");
-
-        for check in checks {
-            self.print_row(check, max_name, max_from, max_to);
-        }
-    }
-
-    fn print_row(
-        &self,
-        check: &DependencyCheck,
-        name_width: usize,
-        from_width: usize,
-        to_width: usize,
-    ) {
-        let from = check
-            .current_version()
-            .map(|v| v.to_string())
-            .unwrap_or_default();
-
-        let to = check
-            .target
-            .as_ref()
-            .map(|v| v.to_string())
-            .unwrap_or_default();
-
-        let severity_str = match check.severity {
-            Some(UpdateSeverity::Major) => {
-                if self.show_colors {
-                    "MAJOR".red().to_string()
-                } else {
-                    "MAJOR".to_string()
-                }
-            }
-            Some(UpdateSeverity::Minor) => {
-                if self.show_colors {
-                    "minor".yellow().to_string()
-                } else {
-                    "minor".to_string()
-                }
-            }
-            Some(UpdateSeverity::Patch) => {
-                if self.show_colors {
-                    "patch".green().to_string()
-                } else {
-                    "patch".to_string()
-                }
-            }
-            None => "".to_string(),
-        };
-
-        // Show "(X available)" if there's a newer version beyond the target
-        let available_hint = if check.has_newer_available() {
-            let hint = format!("  ({} available)", check.latest);
-            if self.show_colors {
-                hint.dimmed().to_string()
-            } else {
-                hint
-            }
-        } else {
-            String::new()
-        };
-
-        println!(
-            "  {:<name_w$}  {:>from_w$} → {:<to_w$}  {:<5}{}",
-            check.dependency.name,
-            from,
-            to,
-            severity_str,
-            available_hint,
-            name_w = name_width,
-            from_w = from_width,
-            to_w = to_width,
-        );
-    }
-}
+// Re-export TableRenderer from core for convenience
+pub use check_updates_core::TableRenderer;
 
 /// Renders global package check results grouped by source
 pub struct GlobalTableRenderer {
@@ -315,12 +194,10 @@ impl UvPythonTableRenderer {
                 } else {
                     "minor".yellow().to_string()
                 }
+            } else if check.is_patch_update() {
+                "patch".to_string()
             } else {
-                if check.is_patch_update() {
-                    "patch".to_string()
-                } else {
-                    "minor".to_string()
-                }
+                "minor".to_string()
             };
 
             println!(

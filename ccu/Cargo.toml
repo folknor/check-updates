@@ -1,0 +1,33 @@
+[package]
+name = "ccu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Check for outdated Rust dependencies"
+repository.workspace = true
+keywords = ["rust", "dependencies", "cargo", "crates"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "ccu"
+path = "src/main.rs"
+
+[dependencies]
+check-updates-core.workspace = true
+clap.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+indicatif.workspace = true
+colored.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Cargo-specific
+toml_edit = "0.24"
+glob = "0.3"
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,4 +1,4 @@
-use crate::version::Version;
+use check_updates_core::Version;
 use std::process::Command;
 use std::str::FromStr;
 

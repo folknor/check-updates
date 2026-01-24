@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 /// Check for outdated Python dependencies
 #[derive(Parser, Debug, Clone)]
-#[command(name = "python-check-updates")]
+#[command(name = "pcu")]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
     /// Path to project directory (defaults to current directory)

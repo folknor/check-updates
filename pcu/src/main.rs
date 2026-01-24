@@ -2,20 +2,20 @@ use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
-use python_check_updates::cli::Args;
-use python_check_updates::detector::ProjectDetector;
-use python_check_updates::global::{
+use pcu::cli::Args;
+use pcu::detector::ProjectDetector;
+use pcu::global::{
     generate_upgrade_commands, GlobalCheck, GlobalPackageDiscovery, UpgradeCommand,
 };
-use python_check_updates::output::{GlobalTableRenderer, TableRenderer, UvPythonTableRenderer};
-use python_check_updates::parsers::{
+use pcu::output::{GlobalTableRenderer, TableRenderer, UvPythonTableRenderer};
+use pcu::parsers::{
     CondaParser, DependencyParser, LockfileParser, PyProjectParser, RequirementsParser,
 };
-use python_check_updates::pypi::PyPiClient;
-use python_check_updates::python::get_python_info;
-use python_check_updates::resolver::{DependencyCheck, DependencyResolver};
-use python_check_updates::updater::FileUpdater;
-use python_check_updates::uv_python::{generate_uv_python_upgrade_commands, UvPythonDiscovery};
+use pcu::pypi::PyPiClient;
+use pcu::python::get_python_info;
+use pcu::updater::FileUpdater;
+use pcu::uv_python::{generate_uv_python_upgrade_commands, UvPythonDiscovery};
+use check_updates_core::{DependencyCheck, DependencyResolver};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 

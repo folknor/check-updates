@@ -1,4 +1,4 @@
-use crate::resolver::{DependencyCheck, UpdateSeverity};
+use check_updates_core::{DependencyCheck, UpdateSeverity};
 use crate::detector::PackageManager;
 use anyhow::{Context, Result};
 use std::collections::{HashSet, HashMap};
@@ -451,7 +451,7 @@ mod tests {
     #[test]
     fn test_update_file_integration() -> Result<()> {
         use crate::parsers::Dependency;
-        use crate::version::{Version, VersionSpec};
+        use check_updates_core::{Version, VersionSpec};
 
         let updater = FileUpdater::new();
 
@@ -522,7 +522,7 @@ mod tests {
     #[test]
     fn test_update_patch_only() -> Result<()> {
         use crate::parsers::Dependency;
-        use crate::version::{Version, VersionSpec};
+        use check_updates_core::{Version, VersionSpec};
 
         let mut file = NamedTempFile::new()?;
         writeln!(file, "serde==1.0.0")?;
@@ -579,7 +579,7 @@ mod tests {
     #[test]
     fn test_update_patch_and_minor() -> Result<()> {
         use crate::parsers::Dependency;
-        use crate::version::{Version, VersionSpec};
+        use check_updates_core::{Version, VersionSpec};
 
         let mut file = NamedTempFile::new()?;
         writeln!(file, "serde==1.0.0")?;

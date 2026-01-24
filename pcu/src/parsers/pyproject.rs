@@ -1,5 +1,5 @@
 use super::{Dependency, DependencyParser};
-use crate::version::VersionSpec;
+use check_updates_core::VersionSpec;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;

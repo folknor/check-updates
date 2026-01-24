@@ -19,6 +19,7 @@ pub struct Version {
     pub minor: u64,
     pub patch: u64,
     pub pre_release: Option<String>,
+    /// Local version segment (Python) or build metadata (Cargo)
     pub local: Option<String>,
     /// Original string representation
     pub original: String,
@@ -175,7 +176,7 @@ pub enum VersionSpec {
     Caret(Version),
     /// ~1.2.3 (tilde - same minor)
     Tilde(Version),
-    /// ~=1.2.3 (compatible release)
+    /// ~=1.2.3 (compatible release - Python)
     Compatible(Version),
     /// ==1.2.*
     Wildcard { prefix: String, pattern: String },
@@ -290,7 +291,26 @@ impl VersionSpec {
             VersionSpec::GreaterThan(v) => version > v,
             VersionSpec::LessThan(v) => version < v,
             VersionSpec::Range { min, max } => version >= min && version < max,
-            VersionSpec::Caret(v) => version >= v && version.major == v.major,
+            VersionSpec::Caret(v) => {
+                // Caret: ^1.2.3 means >=1.2.3 <2.0.0
+                // But for 0.x: ^0.1.2 means >=0.1.2 <0.2.0
+                // And for 0.0.x: ^0.0.3 means =0.0.3
+                if version < v {
+                    return false;
+                }
+                if v.major == 0 {
+                    if v.minor == 0 {
+                        // ^0.0.z means =0.0.z
+                        version.major == 0 && version.minor == 0 && version.patch == v.patch
+                    } else {
+                        // ^0.y.z means >=0.y.z <0.(y+1).0
+                        version.major == 0 && version.minor == v.minor
+                    }
+                } else {
+                    // ^x.y.z means >=x.y.z <(x+1).0.0
+                    version.major == v.major
+                }
+            }
             VersionSpec::Tilde(v) => {
                 version >= v && version.major == v.major && version.minor == v.minor
             }
@@ -339,6 +359,26 @@ impl VersionSpec {
                 prefix.split('.').next().and_then(|s| s.parse().ok())
             }
             VersionSpec::Complex(_) | VersionSpec::Any => None,
+        }
+    }
+
+    /// Get the version string without operators (for Cargo.toml format)
+    /// Returns just "1.0.0" instead of "==1.0.0"
+    pub fn version_string(&self) -> Option<String> {
+        match self {
+            VersionSpec::Pinned(v)
+            | VersionSpec::Minimum(v)
+            | VersionSpec::Maximum(v)
+            | VersionSpec::GreaterThan(v)
+            | VersionSpec::LessThan(v)
+            | VersionSpec::Caret(v)
+            | VersionSpec::Tilde(v)
+            | VersionSpec::Compatible(v)
+            | VersionSpec::NotEqual(v) => Some(v.to_string()),
+            VersionSpec::Range { min, .. } => Some(min.to_string()),
+            VersionSpec::Wildcard { prefix, .. } => Some(format!("{}.*", prefix)),
+            VersionSpec::Complex(s) => Some(s.clone()),
+            VersionSpec::Any => None,
         }
     }
 

@@ -1,0 +1,41 @@
+[package]
+name = "pcu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Check for outdated Python dependencies"
+repository.workspace = true
+keywords = ["python", "dependencies", "pip", "uv", "conda"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "pcu"
+path = "src/main.rs"
+
+[dependencies]
+check-updates-core.workspace = true
+clap.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+indicatif.workspace = true
+colored.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Python-specific
+serde_yaml = "0.9"
+semver = "1"
+regex = "1"
+rayon = "1"
+url = "2"
+dirs = "5"
+
+[dev-dependencies]
+tempfile.workspace = true
+assert_cmd = "2"
+predicates = "3"
+tokio-test = "0.4"
+wiremock = "0.6"

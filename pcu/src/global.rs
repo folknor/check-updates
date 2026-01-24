@@ -1,5 +1,4 @@
-use crate::resolver::UpdateSeverity;
-use crate::version::Version;
+use check_updates_core::{UpdateSeverity, Version};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::fs;

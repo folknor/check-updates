@@ -1,4 +1,4 @@
-use crate::version::Version;
+use check_updates_core::Version;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;

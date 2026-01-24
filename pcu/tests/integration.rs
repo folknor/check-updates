@@ -7,7 +7,7 @@ use std::fs;
 /// Test that --help flag works
 #[test]
 fn test_help_flag() {
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.arg("--help")
         .assert()
         .success()
@@ -21,7 +21,7 @@ fn test_help_flag() {
 /// Test that -h short flag works
 #[test]
 fn test_help_short_flag() {
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.arg("-h")
         .assert()
         .success()
@@ -31,21 +31,21 @@ fn test_help_short_flag() {
 /// Test that --version flag works
 #[test]
 fn test_version_flag() {
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("python-check-updates"));
+        .stdout(predicate::str::contains("pcu"));
 }
 
 /// Test that -V short version flag works
 #[test]
 fn test_version_short_flag() {
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.arg("-V")
         .assert()
         .success()
-        .stdout(predicate::str::contains("python-check-updates"));
+        .stdout(predicate::str::contains("pcu"));
 }
 
 /// Test running on a project with requirements.txt
@@ -53,7 +53,7 @@ fn test_version_short_flag() {
 fn test_detect_requirements_txt() {
     let project = common::create_temp_project_with_requirements();
 
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.arg(project.path())
         .assert()
         .success();
@@ -67,7 +67,7 @@ fn test_detect_requirements_txt() {
 fn test_detect_pep621_pyproject() {
     let project = common::create_temp_project_with_pep621();
 
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.arg(project.path())
         .assert()
         .success();
@@ -78,7 +78,7 @@ fn test_detect_pep621_pyproject() {
 fn test_detect_poetry_pyproject() {
     let project = common::create_temp_project_with_poetry();
 
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.arg(project.path())
         .assert()
         .success();
@@ -89,7 +89,7 @@ fn test_detect_poetry_pyproject() {
 fn test_detect_pdm_pyproject() {
     let project = common::create_temp_project_with_pdm();
 
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.arg(project.path())
         .assert()
         .success();
@@ -100,7 +100,7 @@ fn test_detect_pdm_pyproject() {
 fn test_detect_conda_environment() {
     let project = common::create_temp_project_with_conda();
 
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.arg(project.path())
         .assert()
         .success();
@@ -111,7 +111,7 @@ fn test_detect_conda_environment() {
 fn test_detect_multiple_files() {
     let project = common::create_temp_project_with_multiple_files();
 
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.arg(project.path())
         .assert()
         .success();
@@ -122,7 +122,7 @@ fn test_detect_multiple_files() {
 fn test_empty_project() {
     let project = common::TempProject::new();
 
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     // Should still succeed but indicate no files found
     cmd.arg(project.path()).assert().success();
 }
@@ -132,7 +132,7 @@ fn test_empty_project() {
 fn test_update_flag() {
     let project = common::create_temp_project_with_requirements();
 
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.arg(project.path())
         .arg("--update")
         .assert()
@@ -144,7 +144,7 @@ fn test_update_flag() {
 fn test_minor_flag() {
     let project = common::create_temp_project_with_requirements();
 
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.arg(project.path())
         .arg("--minor")
         .assert()
@@ -156,7 +156,7 @@ fn test_minor_flag() {
 fn test_force_flag() {
     let project = common::create_temp_project_with_requirements();
 
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.arg(project.path())
         .arg("--force")
         .assert()
@@ -168,7 +168,7 @@ fn test_force_flag() {
 fn test_pre_release_flag() {
     let project = common::create_temp_project_with_requirements();
 
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.arg(project.path())
         .arg("--pre-release")
         .assert()
@@ -180,7 +180,7 @@ fn test_pre_release_flag() {
 fn test_combined_flags() {
     let project = common::create_temp_project_with_requirements();
 
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.arg(project.path())
         .arg("--update")
         .arg("--minor")
@@ -197,7 +197,7 @@ fn test_no_modification_without_update() {
 
     let original_content = fs::read_to_string(&req_path).unwrap();
 
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.arg(project.path()).assert().success();
 
     // File should not be modified
@@ -208,7 +208,7 @@ fn test_no_modification_without_update() {
 /// Test running on non-existent directory
 #[test]
 fn test_nonexistent_directory() {
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.arg("/nonexistent/path/to/project")
         .assert()
         .failure();
@@ -219,7 +219,7 @@ fn test_nonexistent_directory() {
 fn test_default_to_current_directory() {
     let project = common::create_temp_project_with_requirements();
 
-    let mut cmd = Command::cargo_bin("python-check-updates").unwrap();
+    let mut cmd = Command::cargo_bin("pcu").unwrap();
     cmd.current_dir(project.path())
         .assert()
         .success();
