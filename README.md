@@ -30,6 +30,10 @@ ccu [PATH]          # Check Cargo project
 
 Combine flags: `-um` for patch+minor, `-uf` for everything.
 
+## Notes
+
+**pcu -g**: For uv tools, only shows main tool packages, not dependencies within tool environments. Run `uv tool upgrade --all` to upgrade everything including dependencies.
+
 ## Supported Files
 
 **pcu**: `requirements.txt`, `pyproject.toml` (PEP 621/Poetry/PDM), `environment.yml`, lock files
