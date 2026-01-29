@@ -974,7 +974,18 @@ dependencies = [
 name = "ncu"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "check-updates-core",
+ "clap",
+ "futures",
+ "glob",
+ "indicatif",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

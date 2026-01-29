@@ -7,7 +7,7 @@ Check for outdated dependencies. Supports Python, Rust, and npm ecosystems.
 ```
 cargo install --path pcu   # Python
 cargo install --path ccu   # Cargo/Rust
-cargo install --path ncu   # npm (not yet implemented)
+cargo install --path ncu   # npm/pnpm/yarn/bun
 ```
 
 ## Usage
@@ -16,6 +16,7 @@ cargo install --path ncu   # npm (not yet implemented)
 pcu [PATH]          # Check Python project
 pcu -g              # Check global packages (uv tools, pipx, pip --user)
 ccu [PATH]          # Check Cargo project
+ncu [PATH]          # Check npm/pnpm/yarn/bun project
 ```
 
 ## Options
@@ -40,7 +41,7 @@ Combine flags: `-um` for patch+minor, `-uf` for everything.
 
 **ccu**: `Cargo.toml`, `Cargo.lock`, workspaces
 
-**ncu**: `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lockb` (planned)
+**ncu**: `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock` (bun.lockb detection only)
 
 ## Output
 
