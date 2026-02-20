@@ -44,7 +44,12 @@ impl FileUpdater {
 
             if let Some(spec) = version_spec {
                 // Use version_string() for Cargo.toml format (without "==" prefix)
+                // Strip build metadata (+...) since it's not valid in Cargo.toml version requirements
                 let new_version = spec.version_string().unwrap_or_else(|| spec.to_string());
+                let new_version = match new_version.find('+') {
+                    Some(idx) => new_version[..idx].to_string(),
+                    None => new_version,
+                };
                 file_updates
                     .entry(check.dependency.source_file.clone())
                     .or_default()
