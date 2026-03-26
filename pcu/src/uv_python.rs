@@ -56,6 +56,12 @@ struct PythonCycle {
 /// Discovery and checking for uv-managed Python installations
 pub struct UvPythonDiscovery {}
 
+impl Default for UvPythonDiscovery {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UvPythonDiscovery {
     pub fn new() -> Self {
         Self {}

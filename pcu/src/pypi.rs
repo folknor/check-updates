@@ -59,11 +59,11 @@ impl PyPiClient {
             .get(&url)
             .send()
             .await
-            .context(format!("Failed to fetch package '{}'", name))?;
+            .context(format!("Failed to fetch package '{name}'"))?;
 
         if !response.status().is_success() {
             if response.status() == 404 {
-                return Err(anyhow!("Package '{}' not found on PyPI", name));
+                return Err(anyhow!("Package '{name}' not found on PyPI"));
             }
             return Err(anyhow!(
                 "PyPI API request failed with status: {}",
@@ -74,7 +74,7 @@ impl PyPiClient {
         let pypi_data: PyPiResponse = response
             .json()
             .await
-            .context(format!("Failed to parse JSON response for '{}'", name))?;
+            .context(format!("Failed to parse JSON response for '{name}'"))?;
 
         // Parse all versions from releases
         let mut all_versions: Vec<Version> = Vec::new();
@@ -97,7 +97,7 @@ impl PyPiClient {
         }
 
         if all_versions.is_empty() {
-            return Err(anyhow!("No valid versions found for package '{}'", name));
+            return Err(anyhow!("No valid versions found for package '{name}'"));
         }
 
         // Sort versions in ascending order
@@ -116,8 +116,7 @@ impl PyPiClient {
 
         if filtered_versions.is_empty() {
             return Err(anyhow!(
-                "No stable versions found for package '{}' (use --pre-release to include pre-releases)",
-                name
+                "No stable versions found for package '{name}' (use --pre-release to include pre-releases)"
             ));
         }
 
@@ -137,8 +136,7 @@ impl PyPiClient {
         // Get latest stable version (always filter out prereleases)
         let latest_stable = all_versions
             .iter()
-            .filter(|v| !v.is_prerelease())
-            .last()
+            .rfind(|v| !v.is_prerelease())
             .cloned();
 
         Ok(PackageInfo {
@@ -171,7 +169,7 @@ impl PyPiClient {
 
             let task = tokio::spawn(async move {
                 // Acquire semaphore permit
-                let _permit = semaphore.acquire().await.unwrap();
+                let _permit = semaphore.acquire().await.expect("semaphore closed");
 
                 let result = client.get_package(&name).await;
 
@@ -199,7 +197,7 @@ impl PyPiClient {
                     errors.push((name, error_msg));
                 }
                 Err(e) => {
-                    errors.push(("unknown".to_string(), format!("Task failed: {}", e)));
+                    errors.push(("unknown".to_string(), format!("Task failed: {e}")));
                 }
             }
         }
@@ -207,7 +205,7 @@ impl PyPiClient {
         // Format errors as strings
         let formatted_errors: Vec<String> = errors
             .into_iter()
-            .map(|(name, msg)| format!("{}: {}", name, msg))
+            .map(|(name, msg)| format!("{name}: {msg}"))
             .collect();
 
         // If we have some results, return them even if some packages failed

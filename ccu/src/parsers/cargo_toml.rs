@@ -2,7 +2,7 @@ use super::{Dependency, DependencyParser};
 use check_updates_core::VersionSpec;
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use toml::Value;
 
 /// Parser for Cargo.toml files
@@ -17,7 +17,7 @@ impl CargoTomlParser {
     fn parse_deps_table(
         &self,
         table: &toml::map::Map<String, Value>,
-        source_file: &PathBuf,
+        source_file: &Path,
         content: &str,
     ) -> Vec<Dependency> {
         let mut deps = Vec::new();
@@ -36,7 +36,7 @@ impl CargoTomlParser {
                     deps.push(Dependency {
                         name: name.clone(),
                         version_spec,
-                        source_file: source_file.clone(),
+                        source_file: source_file.to_path_buf(),
                         line_number,
                         original_line,
                     });
@@ -56,12 +56,12 @@ impl CargoTomlParser {
             || s.starts_with('<') || s.starts_with('=') || s.contains('*')
             || s.contains(',')
         {
-            return VersionSpec::parse(s).map_err(|e| anyhow::anyhow!("{}", e));
+            return VersionSpec::parse(s).map_err(|e| anyhow::anyhow!("{e}"));
         }
 
         // Bare version in Cargo means caret (^)
         // e.g., "1.0" means "^1.0" which allows 1.x but not 2.0
-        VersionSpec::parse(&format!("^{}", s)).map_err(|e| anyhow::anyhow!("{}", e))
+        VersionSpec::parse(&format!("^{s}")).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     /// Extract version string from a dependency value
@@ -107,7 +107,7 @@ impl Default for CargoTomlParser {
 }
 
 impl DependencyParser for CargoTomlParser {
-    fn parse(&self, path: &PathBuf) -> Result<Vec<Dependency>> {
+    fn parse(&self, path: &Path) -> Result<Vec<Dependency>> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
 
@@ -132,11 +132,10 @@ impl DependencyParser for CargoTomlParser {
         }
 
         // Parse [workspace.dependencies]
-        if let Some(workspace) = parsed.get("workspace").and_then(|v| v.as_table()) {
-            if let Some(deps) = workspace.get("dependencies").and_then(|v| v.as_table()) {
+        if let Some(workspace) = parsed.get("workspace").and_then(|v| v.as_table())
+            && let Some(deps) = workspace.get("dependencies").and_then(|v| v.as_table()) {
                 all_deps.extend(self.parse_deps_table(deps, path, &content));
             }
-        }
 
         // Parse [target.'cfg(...)'.dependencies]
         if let Some(target) = parsed.get("target").and_then(|v| v.as_table()) {
@@ -155,7 +154,7 @@ impl DependencyParser for CargoTomlParser {
         Ok(all_deps)
     }
 
-    fn can_parse(&self, path: &PathBuf) -> bool {
+    fn can_parse(&self, path: &Path) -> bool {
         path.file_name()
             .map(|n| n == "Cargo.toml")
             .unwrap_or(false)

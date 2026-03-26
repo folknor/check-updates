@@ -46,14 +46,13 @@ impl ProjectDetector {
 
         // Check for pyproject.toml and determine which package manager
         let pyproject_path = self.project_path.join("pyproject.toml");
-        if pyproject_path.exists() {
-            if let Some(pm) = self.detect_pyproject_manager(&pyproject_path)? {
+        if pyproject_path.exists()
+            && let Some(pm) = self.detect_pyproject_manager(&pyproject_path)? {
                 detected_files.push(DetectedFile {
                     path: pyproject_path,
                     package_manager: pm,
                 });
             }
-        }
 
         // Check for requirements*.txt files (pip)
         if let Ok(entries) = fs::read_dir(&self.project_path) {

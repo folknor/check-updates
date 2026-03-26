@@ -103,39 +103,33 @@ impl FileUpdater {
         ];
 
         for section in sections {
-            if let Some(deps) = doc.get_mut(section) {
-                if let Some(dep) = deps.get_mut(name) {
+            if let Some(deps) = doc.get_mut(section)
+                && let Some(dep) = deps.get_mut(name) {
                     self.update_dep_value(dep, new_version);
                 }
-            }
         }
 
         // Try workspace.dependencies
-        if let Some(workspace) = doc.get_mut("workspace") {
-            if let Some(deps) = workspace.get_mut("dependencies") {
-                if let Some(dep) = deps.get_mut(name) {
+        if let Some(workspace) = doc.get_mut("workspace")
+            && let Some(deps) = workspace.get_mut("dependencies")
+                && let Some(dep) = deps.get_mut(name) {
                     self.update_dep_value(dep, new_version);
                 }
-            }
-        }
 
         // Try target.*.dependencies
-        if let Some(target) = doc.get_mut("target") {
-            if let Some(target_table) = target.as_table_mut() {
+        if let Some(target) = doc.get_mut("target")
+            && let Some(target_table) = target.as_table_mut() {
                 for (_, target_value) in target_table.iter_mut() {
-                    if let Some(deps) = target_value.get_mut("dependencies") {
-                        if let Some(dep) = deps.get_mut(name) {
+                    if let Some(deps) = target_value.get_mut("dependencies")
+                        && let Some(dep) = deps.get_mut(name) {
                             self.update_dep_value(dep, new_version);
                         }
-                    }
-                    if let Some(deps) = target_value.get_mut("dev-dependencies") {
-                        if let Some(dep) = deps.get_mut(name) {
+                    if let Some(deps) = target_value.get_mut("dev-dependencies")
+                        && let Some(dep) = deps.get_mut(name) {
                             self.update_dep_value(dep, new_version);
                         }
-                    }
                 }
             }
-        }
     }
 
     /// Update the version value in a dependency item
@@ -150,25 +144,23 @@ impl FileUpdater {
             }
             // Inline table: serde = { version = "1.0", ... }
             Item::Value(Value::InlineTable(table)) => {
-                if let Some(version) = table.get_mut("version") {
-                    if let Value::String(s) = version {
+                if let Some(version) = table.get_mut("version")
+                    && let Value::String(s) = version {
                         let decor = s.decor().clone();
                         let mut new_str = toml_edit::Formatted::new(new_version.to_string());
                         *new_str.decor_mut() = decor;
                         *s = new_str;
                     }
-                }
             }
             // Full table: [dependencies.serde] version = "1.0"
             Item::Table(table) => {
-                if let Some(version_item) = table.get_mut("version") {
-                    if let Item::Value(Value::String(s)) = version_item {
+                if let Some(version_item) = table.get_mut("version")
+                    && let Item::Value(Value::String(s)) = version_item {
                         let decor = s.decor().clone();
                         let mut new_str = toml_edit::Formatted::new(new_version.to_string());
                         *new_str.decor_mut() = decor;
                         *s = new_str;
                     }
-                }
             }
             _ => {}
         }

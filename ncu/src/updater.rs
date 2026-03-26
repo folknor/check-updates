@@ -90,11 +90,10 @@ impl FileUpdater {
         ];
 
         for section in sections {
-            if let Some(deps) = doc.get_mut(section).and_then(|v| v.as_object_mut()) {
-                if deps.contains_key(name) {
+            if let Some(deps) = doc.get_mut(section).and_then(|v| v.as_object_mut())
+                && deps.contains_key(name) {
                     deps.insert(name.to_string(), serde_json::Value::String(new_version.to_string()));
                 }
-            }
         }
     }
 }

@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
     let project_path = args.project_path();
 
     if !project_path.exists() {
-        anyhow::bail!("Project path does not exist: {:?}", project_path);
+        anyhow::bail!("Project path does not exist: {project_path:?}");
     }
 
     // Detect package.json files
@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
     let detected_files = detector.detect()?;
 
     if detected_files.is_empty() {
-        println!("No package.json files found in {:?}", project_path);
+        println!("No package.json files found in {project_path:?}");
         return Ok(());
     }
 
@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
     progress.set_style(
         ProgressStyle::default_bar()
             .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-            .unwrap()
+            .expect("valid progress template")
             .progress_chars("=>-"),
     );
 
@@ -110,7 +110,7 @@ async fn main() -> Result<()> {
         let updater = FileUpdater::new();
         let result = updater.apply_updates(&checks, args.minor, args.force)?;
         result.print_summary();
-    } else if checks.iter().any(|c| c.has_update()) {
+    } else if checks.iter().any(check_updates_core::DependencyCheck::has_update) {
         println!();
         println!("Run -u to upgrade patch, -um to upgrade patch+minors, and -uf to force upgrade all.");
     }
@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
         println!();
         println!("Packages not found on npm:");
         for (name, error) in errors {
-            println!("  {}: {}", name, error);
+            println!("  {name}: {error}");
         }
     }
 

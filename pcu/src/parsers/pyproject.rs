@@ -2,11 +2,17 @@ use super::{Dependency, DependencyParser};
 use check_updates_core::VersionSpec;
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use toml::Value;
 
 /// Parser for pyproject.toml files (PEP 621, Poetry, PDM)
 pub struct PyProjectParser;
+
+impl Default for PyProjectParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl PyProjectParser {
     pub fn new() -> Self {
@@ -17,7 +23,7 @@ impl PyProjectParser {
     fn parse_pep621_dependencies(
         &self,
         toml_value: &Value,
-        path: &PathBuf,
+        path: &Path,
         content: &str,
     ) -> Result<Vec<Dependency>> {
         let mut dependencies = Vec::new();
@@ -29,11 +35,10 @@ impl PyProjectParser {
             .and_then(|d| d.as_array())
         {
             for dep_value in deps {
-                if let Some(dep_str) = dep_value.as_str() {
-                    if let Some(dep) = self.parse_dependency_string(dep_str, path, content) {
+                if let Some(dep_str) = dep_value.as_str()
+                    && let Some(dep) = self.parse_dependency_string(dep_str, path, content) {
                         dependencies.push(dep);
                     }
-                }
             }
         }
 
@@ -46,12 +51,11 @@ impl PyProjectParser {
             for (_group_name, deps_value) in optional_deps {
                 if let Some(deps) = deps_value.as_array() {
                     for dep_value in deps {
-                        if let Some(dep_str) = dep_value.as_str() {
-                            if let Some(dep) = self.parse_dependency_string(dep_str, path, content)
+                        if let Some(dep_str) = dep_value.as_str()
+                            && let Some(dep) = self.parse_dependency_string(dep_str, path, content)
                             {
                                 dependencies.push(dep);
                             }
-                        }
                     }
                 }
             }
@@ -64,7 +68,7 @@ impl PyProjectParser {
     fn parse_poetry_dependencies(
         &self,
         toml_value: &Value,
-        path: &PathBuf,
+        path: &Path,
         content: &str,
     ) -> Result<Vec<Dependency>> {
         let mut dependencies = Vec::new();
@@ -132,7 +136,7 @@ impl PyProjectParser {
     fn parse_pdm_dependencies(
         &self,
         toml_value: &Value,
-        path: &PathBuf,
+        path: &Path,
         content: &str,
     ) -> Result<Vec<Dependency>> {
         let mut dependencies = Vec::new();
@@ -145,11 +149,10 @@ impl PyProjectParser {
             .and_then(|d| d.as_array())
         {
             for dep_value in deps {
-                if let Some(dep_str) = dep_value.as_str() {
-                    if let Some(dep) = self.parse_dependency_string(dep_str, path, content) {
+                if let Some(dep_str) = dep_value.as_str()
+                    && let Some(dep) = self.parse_dependency_string(dep_str, path, content) {
                         dependencies.push(dep);
                     }
-                }
             }
         }
 
@@ -163,12 +166,11 @@ impl PyProjectParser {
             for (_group_name, deps_value) in dev_deps {
                 if let Some(deps) = deps_value.as_array() {
                     for dep_value in deps {
-                        if let Some(dep_str) = dep_value.as_str() {
-                            if let Some(dep) = self.parse_dependency_string(dep_str, path, content)
+                        if let Some(dep_str) = dep_value.as_str()
+                            && let Some(dep) = self.parse_dependency_string(dep_str, path, content)
                             {
                                 dependencies.push(dep);
                             }
-                        }
                     }
                 }
             }
@@ -181,7 +183,7 @@ impl PyProjectParser {
     fn parse_dependency_groups(
         &self,
         toml_value: &Value,
-        path: &PathBuf,
+        path: &Path,
         content: &str,
     ) -> Result<Vec<Dependency>> {
         let mut dependencies = Vec::new();
@@ -194,12 +196,11 @@ impl PyProjectParser {
             for (_group_name, deps_value) in groups {
                 if let Some(deps) = deps_value.as_array() {
                     for dep_value in deps {
-                        if let Some(dep_str) = dep_value.as_str() {
-                            if let Some(dep) = self.parse_dependency_string(dep_str, path, content)
+                        if let Some(dep_str) = dep_value.as_str()
+                            && let Some(dep) = self.parse_dependency_string(dep_str, path, content)
                             {
                                 dependencies.push(dep);
                             }
-                        }
                     }
                 }
             }
@@ -213,7 +214,7 @@ impl PyProjectParser {
         &self,
         name: &str,
         value: &Value,
-        path: &PathBuf,
+        path: &Path,
         content: &str,
     ) -> Option<Dependency> {
         let version_str = match value {
@@ -236,7 +237,7 @@ impl PyProjectParser {
         Some(Dependency {
             name: name.to_lowercase().replace('_', "-"),
             version_spec,
-            source_file: path.clone(),
+            source_file: path.to_path_buf(),
             line_number,
             original_line,
         })
@@ -246,7 +247,7 @@ impl PyProjectParser {
     fn parse_dependency_string(
         &self,
         dep_str: &str,
-        path: &PathBuf,
+        path: &Path,
         content: &str,
     ) -> Option<Dependency> {
         // Split by comparison operators
@@ -279,7 +280,7 @@ impl PyProjectParser {
                 return Some(Dependency {
                     name: pkg_name.to_lowercase().replace('_', "-"),
                     version_spec,
-                    source_file: path.clone(),
+                    source_file: path.to_path_buf(),
                     line_number,
                     original_line,
                 });
@@ -294,7 +295,7 @@ impl PyProjectParser {
             return Some(Dependency {
                 name: pkg_name.to_lowercase().replace('_', "-"),
                 version_spec: VersionSpec::Any,
-                source_file: path.clone(),
+                source_file: path.to_path_buf(),
                 line_number,
                 original_line,
             });
@@ -319,9 +320,9 @@ impl PyProjectParser {
                         if line[..comment_idx].to_lowercase().contains(&pkg_lower) {
                             return (i + 1, line.trim().to_string());
                         }
-                    } else if !version_str.is_empty() && line.contains(version_str) {
-                        return (i + 1, line.trim().to_string());
-                    } else if line_lower.contains(&pkg_lower) {
+                    } else if (!version_str.is_empty() && line.contains(version_str))
+                        || line_lower.contains(&pkg_lower)
+                    {
                         return (i + 1, line.trim().to_string());
                     }
                 }
@@ -329,12 +330,12 @@ impl PyProjectParser {
         }
 
         // Default if not found
-        (1, format!("{} = \"{}\"", pkg_name, version_str))
+        (1, format!("{pkg_name} = \"{version_str}\""))
     }
 }
 
 impl DependencyParser for PyProjectParser {
-    fn parse(&self, path: &PathBuf) -> Result<Vec<Dependency>> {
+    fn parse(&self, path: &Path) -> Result<Vec<Dependency>> {
         // Read file content
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read file: {}", path.display()))?;
@@ -374,7 +375,7 @@ impl DependencyParser for PyProjectParser {
         Ok(all_dependencies)
     }
 
-    fn can_parse(&self, path: &PathBuf) -> bool {
+    fn can_parse(&self, path: &Path) -> bool {
         path.file_name()
             .and_then(|n| n.to_str())
             .map(|n| n == "pyproject.toml")
@@ -386,6 +387,7 @@ impl DependencyParser for PyProjectParser {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
     use tempfile::NamedTempFile;
 
     #[test]

@@ -44,7 +44,7 @@ impl Version {
             patch,
             pre_release: None,
             local: None,
-            original: format!("{}.{}.{}", major, minor, patch),
+            original: format!("{major}.{minor}.{patch}"),
         }
     }
 
@@ -110,11 +110,10 @@ fn parse_prerelease(s: &str) -> (&str, Option<String>) {
     ];
 
     for pattern in patterns {
-        if let Some(idx) = s.to_lowercase().find(pattern) {
-            if idx > 0 {
+        if let Some(idx) = s.to_lowercase().find(pattern)
+            && idx > 0 {
                 return (&s[..idx], Some(s[idx..].to_string()));
             }
-        }
     }
 
     (s, None)
@@ -376,7 +375,7 @@ impl VersionSpec {
             | VersionSpec::Compatible(v)
             | VersionSpec::NotEqual(v) => Some(v.to_string()),
             VersionSpec::Range { min, .. } => Some(min.to_string()),
-            VersionSpec::Wildcard { prefix, .. } => Some(format!("{}.*", prefix)),
+            VersionSpec::Wildcard { prefix, .. } => Some(format!("{prefix}.*")),
             VersionSpec::Complex(s) => Some(s.clone()),
             VersionSpec::Any => None,
         }
@@ -425,18 +424,18 @@ impl fmt::Display for VersionSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             VersionSpec::Any => write!(f, "*"),
-            VersionSpec::Pinned(v) => write!(f, "=={}", v),
-            VersionSpec::Minimum(v) => write!(f, ">={}", v),
-            VersionSpec::Maximum(v) => write!(f, "<={}", v),
-            VersionSpec::GreaterThan(v) => write!(f, ">{}", v),
-            VersionSpec::LessThan(v) => write!(f, "<{}", v),
-            VersionSpec::Range { min, max } => write!(f, ">={},<{}", min, max),
-            VersionSpec::Caret(v) => write!(f, "^{}", v),
-            VersionSpec::Tilde(v) => write!(f, "~{}", v),
-            VersionSpec::Compatible(v) => write!(f, "~={}", v),
-            VersionSpec::Wildcard { prefix, .. } => write!(f, "=={}.*", prefix),
-            VersionSpec::NotEqual(v) => write!(f, "!={}", v),
-            VersionSpec::Complex(s) => write!(f, "{}", s),
+            VersionSpec::Pinned(v) => write!(f, "=={v}"),
+            VersionSpec::Minimum(v) => write!(f, ">={v}"),
+            VersionSpec::Maximum(v) => write!(f, "<={v}"),
+            VersionSpec::GreaterThan(v) => write!(f, ">{v}"),
+            VersionSpec::LessThan(v) => write!(f, "<{v}"),
+            VersionSpec::Range { min, max } => write!(f, ">={min},<{max}"),
+            VersionSpec::Caret(v) => write!(f, "^{v}"),
+            VersionSpec::Tilde(v) => write!(f, "~{v}"),
+            VersionSpec::Compatible(v) => write!(f, "~={v}"),
+            VersionSpec::Wildcard { prefix, .. } => write!(f, "=={prefix}.*"),
+            VersionSpec::NotEqual(v) => write!(f, "!={v}"),
+            VersionSpec::Complex(s) => write!(f, "{s}"),
         }
     }
 }

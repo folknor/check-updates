@@ -65,13 +65,13 @@ impl TableRenderer {
     ) {
         let from = check
             .current_version()
-            .map(|v| v.to_string())
+            .map(std::string::ToString::to_string)
             .unwrap_or_default();
 
         let to = check
             .target
             .as_ref()
-            .map(|v| v.to_string())
+            .map(std::string::ToString::to_string)
             .unwrap_or_default();
 
         let severity_str = self.format_severity(check.severity);

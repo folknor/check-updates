@@ -31,20 +31,17 @@ pub fn detect_python_version() -> Option<Version> {
     ];
 
     for (cmd, args) in &commands {
-        if let Ok(output) = Command::new(cmd).args(args.as_slice()).output() {
-            if output.status.success() {
+        if let Ok(output) = Command::new(cmd).args(args.as_slice()).output()
+            && output.status.success() {
                 let version_output = String::from_utf8_lossy(&output.stdout);
                 // Output is like "Python 3.11.5"
                 if let Some(version_str) = version_output
                     .trim()
                     .strip_prefix("Python ")
-                {
-                    if let Ok(version) = Version::from_str(version_str) {
+                    && let Ok(version) = Version::from_str(version_str) {
                         return Some(version);
                     }
-                }
             }
-        }
     }
 
     None

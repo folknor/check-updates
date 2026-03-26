@@ -8,6 +8,9 @@ repository.workspace = true
 keywords = ["rust", "dependencies", "cargo", "crates"]
 categories = ["command-line-utilities", "development-tools"]
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "ccu"
 path = "src/main.rs"

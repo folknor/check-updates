@@ -2,11 +2,17 @@ use check_updates_core::{DependencyCheck, UpdateSeverity};
 use crate::detector::PackageManager;
 use anyhow::{Context, Result};
 use std::collections::{HashSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::fs;
 
 /// Updates dependency files with new versions
 pub struct FileUpdater;
+
+impl Default for FileUpdater {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl FileUpdater {
     pub fn new() -> Self {
@@ -53,7 +59,7 @@ impl FileUpdater {
                 // Track which packages appear in which files
                 package_file_map
                     .entry(check.dependency.name.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(check.dependency.source_file.clone());
             }
         }
@@ -93,16 +99,16 @@ impl FileUpdater {
     }
 
     /// Update a single file with the given dependency updates
-    fn update_file(&self, file_path: &PathBuf, updates: &[(&DependencyCheck, String)]) -> Result<()> {
+    fn update_file(&self, file_path: &Path, updates: &[(&DependencyCheck, String)]) -> Result<()> {
         // Read the entire file
         let content = fs::read_to_string(file_path)
             .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
 
-        let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+        let mut lines: Vec<String> = content.lines().map(std::string::ToString::to_string).collect();
 
         // Sort updates by line number in descending order to avoid offset issues
         let mut sorted_updates: Vec<_> = updates.iter().collect();
-        sorted_updates.sort_by(|a, b| b.0.dependency.line_number.cmp(&a.0.dependency.line_number));
+        sorted_updates.sort_by_key(|x| std::cmp::Reverse(x.0.dependency.line_number));
 
         // Apply each update
         for (check, new_version) in sorted_updates {
@@ -129,7 +135,7 @@ impl FileUpdater {
         let new_content = lines.join("\n");
         // Add trailing newline if original had one
         let new_content = if content.ends_with('\n') {
-            format!("{}\n", new_content)
+            format!("{new_content}\n")
         } else {
             new_content
         };
@@ -147,7 +153,7 @@ impl FileUpdater {
         package_name: &str,
         old_spec: &str,
         new_spec: &str,
-        file_path: &PathBuf,
+        file_path: &Path,
     ) -> Result<String> {
         let file_name = file_path.file_name()
             .and_then(|n| n.to_str())
@@ -178,29 +184,26 @@ impl FileUpdater {
         // Format: package==1.0.0 or package>=1.0.0,<2.0.0 or package[extras]==1.0.0
 
         // Try exact match first
-        if let Some(new_line) = line.replace(&format!("{}{}", package_name, old_spec),
-                                              &format!("{}{}", package_name, new_spec))
-                                    .into() {
-            if new_line != line {
+        if let Some(new_line) = line.replace(&format!("{package_name}{old_spec}"),
+                                              &format!("{package_name}{new_spec}"))
+                                    .into()
+            && new_line != line {
                 return Ok(new_line);
             }
-        }
 
         // Try with brackets (extras)
-        if line.contains('[') {
-            if let Some(bracket_start) = line.find('[') {
-                if let Some(bracket_end) = line.find(']') {
+        if line.contains('[')
+            && let Some(bracket_start) = line.find('[')
+                && let Some(bracket_end) = line.find(']') {
                     let before_bracket = &line[..bracket_start];
                     let extras = &line[bracket_start..=bracket_end];
                     let after_bracket = &line[bracket_end + 1..];
 
                     if before_bracket.trim() == package_name {
                         let new_after = after_bracket.replace(old_spec, new_spec);
-                        return Ok(format!("{}{}{}", before_bracket, extras, new_after));
+                        return Ok(format!("{before_bracket}{extras}{new_after}"));
                     }
                 }
-            }
-        }
 
         // Fallback: simple string replacement
         Ok(line.replace(old_spec, new_spec))
@@ -220,8 +223,8 @@ impl FileUpdater {
         if line.to_lowercase().contains(&package_name.to_lowercase()) {
             // Replace the version spec, preserving quotes
             let result = line.replace(
-                &format!("\"{}\"", old_spec),
-                &format!("\"{}\"", new_spec)
+                &format!("\"{old_spec}\""),
+                &format!("\"{new_spec}\"")
             );
             if result != line {
                 return Ok(result);
@@ -229,8 +232,8 @@ impl FileUpdater {
 
             // Try single quotes
             let result = line.replace(
-                &format!("'{}'", old_spec),
-                &format!("'{}'", new_spec)
+                &format!("'{old_spec}'"),
+                &format!("'{new_spec}'")
             );
             if result != line {
                 return Ok(result);
@@ -257,8 +260,8 @@ impl FileUpdater {
 
         // Try with ==
         let result = line.replace(
-            &format!("{}{}", package_name, old_spec),
-            &format!("{}{}", package_name, new_spec)
+            &format!("{package_name}{old_spec}"),
+            &format!("{package_name}{new_spec}")
         );
         if result != line {
             return Ok(result);
@@ -266,8 +269,8 @@ impl FileUpdater {
 
         // Try with single =
         let result = line.replace(
-            &format!("{}{}", package_name, conda_old_spec),
-            &format!("{}{}", package_name, conda_new_spec)
+            &format!("{package_name}{conda_old_spec}"),
+            &format!("{package_name}{conda_new_spec}")
         );
         if result != line {
             return Ok(result);
@@ -279,7 +282,7 @@ impl FileUpdater {
 }
 
 /// Detect package manager from file path
-fn detect_package_manager(path: &PathBuf) -> Option<PackageManager> {
+fn detect_package_manager(path: &Path) -> Option<PackageManager> {
     let file_name = path.file_name()?.to_str()?;
 
     if file_name.starts_with("requirements") {
@@ -331,7 +334,7 @@ impl UpdateResult {
                 PackageManager::Pdm => "pdm lock",
                 PackageManager::Conda => "conda env update",
             };
-            println!("Run {} to sync dependencies", cmd);
+            println!("Run {cmd} to sync dependencies");
         }
     }
 }

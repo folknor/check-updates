@@ -2,10 +2,16 @@ use super::{Dependency, DependencyParser};
 use check_updates_core::VersionSpec;
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 
 /// Parser for requirements.txt files
 pub struct RequirementsParser;
+
+impl Default for RequirementsParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl RequirementsParser {
     pub fn new() -> Self {
@@ -13,7 +19,7 @@ impl RequirementsParser {
     }
 
     /// Parse a single line from requirements.txt
-    fn parse_line(line: &str, line_number: usize, source_file: &PathBuf) -> Option<Dependency> {
+    fn parse_line(line: &str, line_number: usize, source_file: &Path) -> Option<Dependency> {
         let original_line = line.to_string();
         let line = line.trim();
 
@@ -86,7 +92,7 @@ impl RequirementsParser {
         Some(Dependency {
             name: normalized_name,
             version_spec,
-            source_file: source_file.clone(),
+            source_file: source_file.to_path_buf(),
             line_number,
             original_line,
         })
@@ -128,9 +134,9 @@ impl RequirementsParser {
 }
 
 impl DependencyParser for RequirementsParser {
-    fn parse(&self, path: &PathBuf) -> Result<Vec<Dependency>> {
+    fn parse(&self, path: &Path) -> Result<Vec<Dependency>> {
         let content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read requirements file: {:?}", path))?;
+            .with_context(|| format!("Failed to read requirements file: {path:?}"))?;
 
         let dependencies: Vec<Dependency> = content
             .lines()
@@ -144,7 +150,7 @@ impl DependencyParser for RequirementsParser {
         Ok(dependencies)
     }
 
-    fn can_parse(&self, path: &PathBuf) -> bool {
+    fn can_parse(&self, path: &Path) -> bool {
         path.file_name()
             .and_then(|n| n.to_str())
             .map(|n| n.starts_with("requirements") && n.ends_with(".txt"))
@@ -156,6 +162,7 @@ impl DependencyParser for RequirementsParser {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
     use tempfile::NamedTempFile;
 
     #[test]

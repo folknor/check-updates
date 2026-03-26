@@ -157,8 +157,7 @@ impl GlobalPackageDiscovery {
                 if let Some(version_str) = venv_data
                     .pointer("/metadata/main_package/package_version")
                     .and_then(|v| v.as_str())
-                {
-                    if let Ok(version) = Version::from_str(version_str) {
+                    && let Ok(version) = Version::from_str(version_str) {
                         packages.push(GlobalPackage {
                             name: name.clone(),
                             installed_version: version,
@@ -166,7 +165,6 @@ impl GlobalPackageDiscovery {
                             python_version: None,
                         });
                     }
-                }
             }
         }
 
@@ -217,7 +215,7 @@ impl GlobalPackageDiscovery {
         // Find the python directory (e.g., python3.11)
         let python_dir = fs::read_dir(&site_packages)
             .ok()?
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .find(|e| e.file_name().to_string_lossy().starts_with("python"))?;
 
         let actual_site_packages = python_dir.path().join("site-packages");
@@ -236,11 +234,10 @@ impl GlobalPackageDiscovery {
                     .to_lowercase()
                     .replace('-', "_");
                 // Check if this dist-info matches our package
-                if dist_name.starts_with(&normalized_name) {
-                    if let Some((_, version)) = self.parse_dist_info_name(&name) {
+                if dist_name.starts_with(&normalized_name)
+                    && let Some((_, version)) = self.parse_dist_info_name(&name) {
                         return Some(version);
                     }
-                }
             }
         }
 
@@ -264,7 +261,7 @@ impl GlobalPackageDiscovery {
 
         // Find all python3.x directories and collect them sorted
         let mut python_dirs: Vec<_> = fs::read_dir(&user_lib)?
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| {
                 let name = e.file_name().to_string_lossy().to_string();
                 name.starts_with("python3.") || name.starts_with("python2.")
@@ -385,7 +382,7 @@ pub fn group_by_source(checks: &[GlobalCheck]) -> HashMap<GlobalSource, Vec<&Glo
 /// Check if a Python version is available on the system
 pub fn is_python_available(version: &str) -> bool {
     // Try python3.X --version
-    let cmd = format!("python{}", version);
+    let cmd = format!("python{version}");
     Command::new(&cmd)
         .arg("--version")
         .output()
@@ -396,9 +393,9 @@ pub fn is_python_available(version: &str) -> bool {
 /// Get the user's home directory path for display
 fn get_pip_user_path(python_version: &str) -> String {
     dirs::home_dir()
-        .map(|h| h.join(format!(".local/lib/python{}", python_version)))
+        .map(|h| h.join(format!(".local/lib/python{python_version}")))
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| format!("~/.local/lib/python{}", python_version))
+        .unwrap_or_else(|| format!("~/.local/lib/python{python_version}"))
 }
 
 /// An upgrade command or a comment (for unavailable Python versions)
@@ -436,7 +433,7 @@ pub fn generate_upgrade_commands(checks: &[GlobalCheck]) -> Vec<UpgradeCommand> 
                 .unwrap_or_else(|| "unknown".to_string());
             by_python
                 .entry(py_version)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(check.package.name.as_str());
         }
 
@@ -451,8 +448,7 @@ pub fn generate_upgrade_commands(checks: &[GlobalCheck]) -> Vec<UpgradeCommand> 
             } else {
                 let path = get_pip_user_path(&py_version);
                 commands.push(UpgradeCommand::Comment(format!(
-                    "Python {} is no longer installed. Consider removing {} if nothing uses it.",
-                    py_version, path
+                    "Python {py_version} is no longer installed. Consider removing {path} if nothing uses it."
                 )));
             }
         }

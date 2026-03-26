@@ -62,7 +62,7 @@ async fn run_global_mode(args: &Args) -> Result<()> {
         } else {
             format!("Python {}", py_info.current)
         };
-        println!("{}\n", version_str);
+        println!("{version_str}\n");
     }
 
     if packages.is_empty() {
@@ -88,14 +88,14 @@ async fn run_global_mode(args: &Args) -> Result<()> {
             .template(
                 "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
             )
-            .unwrap()
+            .expect("valid progress template")
             .progress_chars("#>-"),
     );
 
     let pb_clone = Arc::new(Mutex::new(progress_bar.clone()));
     let result = pypi_client
         .get_packages(&package_names, move |current, _total| {
-            let pb = pb_clone.lock().unwrap();
+            let pb = pb_clone.lock().expect("lock poisoned");
             pb.set_position(current as u64);
         })
         .await?;
@@ -139,13 +139,12 @@ async fn run_global_mode(args: &Args) -> Result<()> {
     renderer.render(&checks);
 
     // 4b. Display uv Python version checks
-    if let Ok(uv_checks) = &uv_python_checks {
-        if !uv_checks.is_empty() {
+    if let Ok(uv_checks) = &uv_python_checks
+        && !uv_checks.is_empty() {
             println!();
             let uv_renderer = UvPythonTableRenderer::new(true);
             uv_renderer.render(uv_checks);
         }
-    }
 
     // 5. Print upgrade commands
     let mut commands = generate_upgrade_commands(&checks);
@@ -160,7 +159,7 @@ async fn run_global_mode(args: &Args) -> Result<()> {
         println!("To upgrade, run:\n");
         for cmd in &commands {
             match cmd {
-                UpgradeCommand::Command(c) => println!("  $ {}", c),
+                UpgradeCommand::Command(c) => println!("  $ {c}"),
                 UpgradeCommand::Comment(c) => println!("  # {}", c.dimmed()),
             }
         }
@@ -183,11 +182,11 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     // Validate project path exists
     if !project_path.exists() {
-        anyhow::bail!("Project path does not exist: {:?}", project_path);
+        anyhow::bail!("Project path does not exist: {project_path:?}");
     }
 
     if !project_path.is_dir() {
-        anyhow::bail!("Project path is not a directory: {:?}", project_path);
+        anyhow::bail!("Project path is not a directory: {project_path:?}");
     }
 
     // 1. Detect project type and find dependency files
@@ -195,7 +194,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     let detected_files = detector.detect()?;
 
     if detected_files.is_empty() {
-        println!("No dependency files found in {:?}", project_path);
+        println!("No dependency files found in {project_path:?}");
         return Ok(());
     }
 
@@ -246,7 +245,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
             .template(
                 "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
             )
-            .unwrap()
+            .expect("valid progress template")
             .progress_chars("#>-"),
     );
 
@@ -255,7 +254,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     // Fetch package info and Python version concurrently
     let (pypi_result, python_info) = tokio::join!(
         pypi_client.get_packages(&package_names, move |current, _total| {
-            let pb = progress_bar_clone.lock().unwrap();
+            let pb = progress_bar_clone.lock().expect("lock poisoned");
             pb.set_position(current as u64);
         }),
         get_python_info(true)
@@ -281,7 +280,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         } else {
             format!("Python {}", py_info.current)
         };
-        println!("{}\n", version_str);
+        println!("{version_str}\n");
     }
 
     // Print fetch errors if any
@@ -316,7 +315,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
             let key = format!(
                 "{}:{}",
                 c.dependency.name,
-                c.target.as_ref().map(|v| v.to_string()).unwrap_or_default()
+                c.target.as_ref().map(std::string::ToString::to_string).unwrap_or_default()
             );
             seen.insert(key)
         })

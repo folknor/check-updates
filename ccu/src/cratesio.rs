@@ -55,11 +55,11 @@ impl CratesIoClient {
             .get(&url)
             .send()
             .await
-            .context(format!("Failed to fetch crate '{}'", name))?;
+            .context(format!("Failed to fetch crate '{name}'"))?;
 
         if !response.status().is_success() {
             if response.status() == reqwest::StatusCode::NOT_FOUND {
-                return Err(anyhow!("Crate '{}' not found on crates.io", name));
+                return Err(anyhow!("Crate '{name}' not found on crates.io"));
             }
             return Err(anyhow!(
                 "crates.io API request failed with status: {}",
@@ -70,7 +70,7 @@ impl CratesIoClient {
         let crate_data: CrateResponse = response
             .json()
             .await
-            .context(format!("Failed to parse JSON response for '{}'", name))?;
+            .context(format!("Failed to parse JSON response for '{name}'"))?;
 
         // Parse all versions, skipping yanked ones
         let mut all_versions: Vec<Version> = Vec::new();
@@ -85,7 +85,7 @@ impl CratesIoClient {
         }
 
         if all_versions.is_empty() {
-            return Err(anyhow!("No valid versions found for crate '{}'", name));
+            return Err(anyhow!("No valid versions found for crate '{name}'"));
         }
 
         // Sort versions in ascending order
@@ -104,8 +104,7 @@ impl CratesIoClient {
 
         if filtered_versions.is_empty() {
             return Err(anyhow!(
-                "No stable versions found for crate '{}' (use --pre-release to include pre-releases)",
-                name
+                "No stable versions found for crate '{name}' (use --pre-release to include pre-releases)"
             ));
         }
 
@@ -125,8 +124,7 @@ impl CratesIoClient {
         // Get latest stable version (always filter out prereleases)
         let latest_stable = all_versions
             .iter()
-            .filter(|v| !v.is_prerelease())
-            .last()
+            .rfind(|v| !v.is_prerelease())
             .cloned();
 
         Ok(PackageInfo {
@@ -160,7 +158,7 @@ impl CratesIoClient {
 
             let task = tokio::spawn(async move {
                 // Acquire semaphore permit
-                let _permit = semaphore.acquire().await.unwrap();
+                let _permit = semaphore.acquire().await.expect("semaphore closed");
 
                 let result = client.get_package(&name).await;
 
@@ -187,7 +185,7 @@ impl CratesIoClient {
                     errors.push((name, error_msg));
                 }
                 Err(e) => {
-                    errors.push(("unknown".to_string(), format!("Task failed: {}", e)));
+                    errors.push(("unknown".to_string(), format!("Task failed: {e}")));
                 }
             }
         }
@@ -195,7 +193,7 @@ impl CratesIoClient {
         // Format errors as strings
         let formatted_errors: Vec<String> = errors
             .into_iter()
-            .map(|(name, msg)| format!("{}: {}", name, msg))
+            .map(|(name, msg)| format!("{name}: {msg}"))
             .collect();
 
         // If we have some results, return them even if some packages failed

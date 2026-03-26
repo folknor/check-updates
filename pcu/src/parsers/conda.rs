@@ -3,10 +3,16 @@ use check_updates_core::VersionSpec;
 use anyhow::{Context, Result};
 use serde_yaml::Value;
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 
 /// Parser for conda environment.yml files
 pub struct CondaParser;
+
+impl Default for CondaParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl CondaParser {
     pub fn new() -> Self {
@@ -34,7 +40,7 @@ impl CondaParser {
         if let Some(idx) = dep_str.find(">=") {
             let name = dep_str[..idx].trim().to_lowercase();
             let version_str = dep_str[idx + 2..].trim();
-            return match VersionSpec::parse(&format!(">={}", version_str)) {
+            return match VersionSpec::parse(&format!(">={version_str}")) {
                 Ok(spec) => Some((name, spec)),
                 Err(_) => Some((name, VersionSpec::Any)),
             };
@@ -43,7 +49,7 @@ impl CondaParser {
         if let Some(idx) = dep_str.find("<=") {
             let name = dep_str[..idx].trim().to_lowercase();
             let version_str = dep_str[idx + 2..].trim();
-            return match VersionSpec::parse(&format!("<={}", version_str)) {
+            return match VersionSpec::parse(&format!("<={version_str}")) {
                 Ok(spec) => Some((name, spec)),
                 Err(_) => Some((name, VersionSpec::Any)),
             };
@@ -52,7 +58,7 @@ impl CondaParser {
         if let Some(idx) = dep_str.find("!=") {
             let name = dep_str[..idx].trim().to_lowercase();
             let version_str = dep_str[idx + 2..].trim();
-            return match VersionSpec::parse(&format!("!={}", version_str)) {
+            return match VersionSpec::parse(&format!("!={version_str}")) {
                 Ok(spec) => Some((name, spec)),
                 Err(_) => Some((name, VersionSpec::Any)),
             };
@@ -61,7 +67,7 @@ impl CondaParser {
         if let Some(idx) = dep_str.find('>') {
             let name = dep_str[..idx].trim().to_lowercase();
             let version_str = dep_str[idx + 1..].trim();
-            return match VersionSpec::parse(&format!(">{}", version_str)) {
+            return match VersionSpec::parse(&format!(">{version_str}")) {
                 Ok(spec) => Some((name, spec)),
                 Err(_) => Some((name, VersionSpec::Any)),
             };
@@ -70,7 +76,7 @@ impl CondaParser {
         if let Some(idx) = dep_str.find('<') {
             let name = dep_str[..idx].trim().to_lowercase();
             let version_str = dep_str[idx + 1..].trim();
-            return match VersionSpec::parse(&format!("<{}", version_str)) {
+            return match VersionSpec::parse(&format!("<{version_str}")) {
                 Ok(spec) => Some((name, spec)),
                 Err(_) => Some((name, VersionSpec::Any)),
             };
@@ -81,7 +87,7 @@ impl CondaParser {
             let version_str = dep_str[idx + 1..].trim();
 
             // Conda uses = for pinning, convert to ==
-            return match VersionSpec::parse(&format!("=={}", version_str)) {
+            return match VersionSpec::parse(&format!("=={version_str}")) {
                 Ok(spec) => Some((name, spec)),
                 Err(_) => Some((name, VersionSpec::Any)),
             };
@@ -113,11 +119,10 @@ impl CondaParser {
         let mut split_pos = None;
 
         for op in &operators {
-            if let Some(pos) = dep_str.find(op) {
-                if split_pos.is_none() || pos < split_pos.unwrap() {
+            if let Some(pos) = dep_str.find(op)
+                && split_pos.is_none_or(|sp| pos < sp) {
                     split_pos = Some(pos);
                 }
-            }
         }
 
         if let Some(pos) = split_pos {
@@ -137,7 +142,7 @@ impl CondaParser {
 }
 
 impl DependencyParser for CondaParser {
-    fn parse(&self, path: &PathBuf) -> Result<Vec<Dependency>> {
+    fn parse(&self, path: &Path) -> Result<Vec<Dependency>> {
         let content = fs::read_to_string(path)
             .context(format!("Failed to read file: {}", path.display()))?;
 
@@ -160,26 +165,25 @@ impl DependencyParser for CondaParser {
                         dependencies.push(Dependency {
                             name,
                             version_spec,
-                            source_file: path.clone(),
+                            source_file: path.to_path_buf(),
                             line_number,
-                            original_line: format!("  - {}", dep_str),
+                            original_line: format!("  - {dep_str}"),
                         });
                     }
                 } else if let Some(pip_section) = dep.as_mapping() {
                     // This might be a pip section: { pip: [...] }
                     if let Some(pip_deps) = pip_section.get("pip").and_then(|v| v.as_sequence()) {
                         for (pip_idx, pip_dep) in pip_deps.iter().enumerate() {
-                            if let Some(pip_dep_str) = pip_dep.as_str() {
-                                if let Some((name, version_spec)) = Self::parse_pip_dependency(pip_dep_str) {
+                            if let Some(pip_dep_str) = pip_dep.as_str()
+                                && let Some((name, version_spec)) = Self::parse_pip_dependency(pip_dep_str) {
                                     dependencies.push(Dependency {
                                         name,
                                         version_spec,
-                                        source_file: path.clone(),
+                                        source_file: path.to_path_buf(),
                                         line_number: line_number + pip_idx + 1, // Approximate line number
-                                        original_line: format!("    - {}", pip_dep_str),
+                                        original_line: format!("    - {pip_dep_str}"),
                                     });
                                 }
-                            }
                         }
                     }
                 }
@@ -189,7 +193,7 @@ impl DependencyParser for CondaParser {
         Ok(dependencies)
     }
 
-    fn can_parse(&self, path: &PathBuf) -> bool {
+    fn can_parse(&self, path: &Path) -> bool {
         path.file_name()
             .and_then(|n| n.to_str())
             .map(|n| n == "environment.yml" || n == "environment.yaml")
@@ -201,6 +205,7 @@ impl DependencyParser for CondaParser {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
     use tempfile::NamedTempFile;
 
     #[test]

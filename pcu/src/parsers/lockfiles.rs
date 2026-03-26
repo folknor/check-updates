@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use std::str::FromStr;
 
 /// Parser for various lock files to get installed versions
@@ -40,7 +40,7 @@ impl LockfileParser {
     }
 
     /// Parse a lock file and return a map of package name -> installed version
-    pub fn parse(&self, path: &PathBuf) -> Result<HashMap<String, Version>> {
+    pub fn parse(&self, path: &Path) -> Result<HashMap<String, Version>> {
         let filename = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -50,12 +50,12 @@ impl LockfileParser {
             "uv.lock" => self.parse_uv_lock(path),
             "poetry.lock" => self.parse_poetry_lock(path),
             "pdm.lock" => self.parse_pdm_lock(path),
-            _ => anyhow::bail!("Unsupported lock file: {}", filename),
+            _ => anyhow::bail!("Unsupported lock file: {filename}"),
         }
     }
 
     /// Try to find and parse any lock file in the given directory
-    pub fn find_and_parse(&self, dir: &PathBuf) -> Result<HashMap<String, Version>> {
+    pub fn find_and_parse(&self, dir: &Path) -> Result<HashMap<String, Version>> {
         // Priority order: uv.lock, poetry.lock, pdm.lock
         let lock_files = ["uv.lock", "poetry.lock", "pdm.lock"];
 
@@ -71,7 +71,7 @@ impl LockfileParser {
     }
 
     /// Check if we can parse this lock file
-    pub fn can_parse(&self, path: &PathBuf) -> bool {
+    pub fn can_parse(&self, path: &Path) -> bool {
         path.file_name()
             .and_then(|n| n.to_str())
             .map(|n| {
@@ -85,12 +85,12 @@ impl LockfileParser {
     }
 
     /// Parse uv.lock file (TOML format with [[package]] sections)
-    fn parse_uv_lock(&self, path: &PathBuf) -> Result<HashMap<String, Version>> {
+    fn parse_uv_lock(&self, path: &Path) -> Result<HashMap<String, Version>> {
         let content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read uv.lock at {:?}", path))?;
+            .with_context(|| format!("Failed to read uv.lock at {path:?}"))?;
 
         let lock_file: TomlLockFile = toml::from_str(&content)
-            .with_context(|| format!("Failed to parse uv.lock at {:?}", path))?;
+            .with_context(|| format!("Failed to parse uv.lock at {path:?}"))?;
 
         let mut versions = HashMap::new();
         for package in lock_file.package {
@@ -115,12 +115,12 @@ impl LockfileParser {
     }
 
     /// Parse poetry.lock file (TOML format with [[package]] sections)
-    fn parse_poetry_lock(&self, path: &PathBuf) -> Result<HashMap<String, Version>> {
+    fn parse_poetry_lock(&self, path: &Path) -> Result<HashMap<String, Version>> {
         let content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read poetry.lock at {:?}", path))?;
+            .with_context(|| format!("Failed to read poetry.lock at {path:?}"))?;
 
         let lock_file: TomlLockFile = toml::from_str(&content)
-            .with_context(|| format!("Failed to parse poetry.lock at {:?}", path))?;
+            .with_context(|| format!("Failed to parse poetry.lock at {path:?}"))?;
 
         let mut versions = HashMap::new();
         for package in lock_file.package {
@@ -144,12 +144,12 @@ impl LockfileParser {
     }
 
     /// Parse pdm.lock file (TOML format)
-    fn parse_pdm_lock(&self, path: &PathBuf) -> Result<HashMap<String, Version>> {
+    fn parse_pdm_lock(&self, path: &Path) -> Result<HashMap<String, Version>> {
         let content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read pdm.lock at {:?}", path))?;
+            .with_context(|| format!("Failed to read pdm.lock at {path:?}"))?;
 
         let lock_file: PdmLockFile = toml::from_str(&content)
-            .with_context(|| format!("Failed to parse pdm.lock at {:?}", path))?;
+            .with_context(|| format!("Failed to parse pdm.lock at {path:?}"))?;
 
         let mut versions = HashMap::new();
         for package in lock_file.package {
@@ -183,6 +183,7 @@ impl Default for LockfileParser {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
     use tempfile::NamedTempFile;
 
     #[test]

@@ -8,6 +8,9 @@ repository.workspace = true
 keywords = ["npm", "pnpm", "yarn", "bun", "dependencies"]
 categories = ["command-line-utilities", "development-tools"]
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "ncu"
 path = "src/main.rs"

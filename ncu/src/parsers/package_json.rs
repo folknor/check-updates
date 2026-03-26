@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use check_updates_core::{Dependency, VersionSpec};
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 
 pub struct PackageJsonParser;
 
@@ -11,7 +11,7 @@ impl PackageJsonParser {
     }
 
     /// Parse dependencies from a package.json file
-    pub fn parse(&self, path: &PathBuf) -> Result<Vec<Dependency>> {
+    pub fn parse(&self, path: &Path) -> Result<Vec<Dependency>> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
 
@@ -46,7 +46,7 @@ impl PackageJsonParser {
     fn parse_deps(
         &self,
         deps: &serde_json::Map<String, serde_json::Value>,
-        source_file: &PathBuf,
+        source_file: &Path,
         content: &str,
     ) -> Vec<Dependency> {
         let mut result = Vec::new();
@@ -75,7 +75,7 @@ impl PackageJsonParser {
                     result.push(Dependency {
                         name: name.clone(),
                         version_spec,
-                        source_file: source_file.clone(),
+                        source_file: source_file.to_path_buf(),
                         line_number,
                         original_line,
                     });
@@ -92,12 +92,12 @@ impl PackageJsonParser {
 
         // npm uses same caret/tilde semantics
         // ^1.2.3, ~1.2.3, >=1.0.0, 1.2.3, etc.
-        VersionSpec::parse(s).map_err(|e| anyhow::anyhow!("{}", e))
+        VersionSpec::parse(s).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     fn find_line_number(content: &str, package_name: &str) -> usize {
         for (i, line) in content.lines().enumerate() {
-            if line.contains(&format!("\"{}\"", package_name)) {
+            if line.contains(&format!("\"{package_name}\"")) {
                 return i + 1;
             }
         }

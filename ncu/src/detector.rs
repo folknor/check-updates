@@ -31,9 +31,9 @@ impl ProjectDetector {
         });
 
         // Check for workspace packages (npm/yarn/pnpm workspaces)
-        if let Ok(content) = std::fs::read_to_string(&package_json) {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(workspaces) = self.get_workspaces(&parsed) {
+        if let Ok(content) = std::fs::read_to_string(&package_json)
+            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content)
+                && let Some(workspaces) = self.get_workspaces(&parsed) {
                     for pattern in workspaces {
                         let member_jsons = self.expand_workspace_pattern(&pattern)?;
                         for path in member_jsons {
@@ -43,8 +43,6 @@ impl ProjectDetector {
                         }
                     }
                 }
-            }
-        }
 
         Ok(detected)
     }

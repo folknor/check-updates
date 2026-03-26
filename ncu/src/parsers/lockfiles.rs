@@ -53,11 +53,10 @@ impl LockfileParser {
                     continue;
                 }
 
-                if let Some(version_str) = pkg_data.get("version").and_then(|v| v.as_str()) {
-                    if let Ok(version) = Version::from_str(version_str) {
+                if let Some(version_str) = pkg_data.get("version").and_then(|v| v.as_str())
+                    && let Ok(version) = Version::from_str(version_str) {
                         versions.insert(name, version);
                     }
-                }
             }
         }
         // npm v6 format: dependencies field
@@ -74,11 +73,10 @@ impl LockfileParser {
         versions: &mut HashMap<String, Version>,
     ) {
         for (name, data) in deps {
-            if let Some(version_str) = data.get("version").and_then(|v| v.as_str()) {
-                if let Ok(version) = Version::from_str(version_str) {
+            if let Some(version_str) = data.get("version").and_then(|v| v.as_str())
+                && let Ok(version) = Version::from_str(version_str) {
                     versions.insert(name.clone(), version);
                 }
-            }
         }
     }
 
@@ -96,22 +94,20 @@ impl LockfileParser {
         // Package entries like: "express@4.18.2" or "express@4.18.2(supports-color@8.0.0)"
         if let Some(packages) = parsed.get("packages").and_then(|v| v.as_mapping()) {
             for (key, _) in packages {
-                if let Some(key_str) = key.as_str() {
-                    if let Some((name, version)) = Self::parse_pnpm_package_key(key_str) {
+                if let Some(key_str) = key.as_str()
+                    && let Some((name, version)) = Self::parse_pnpm_package_key(key_str) {
                         versions.insert(name, version);
                     }
-                }
             }
         }
 
         // Also check snapshots (pnpm v9)
         if let Some(snapshots) = parsed.get("snapshots").and_then(|v| v.as_mapping()) {
             for (key, _) in snapshots {
-                if let Some(key_str) = key.as_str() {
-                    if let Some((name, version)) = Self::parse_pnpm_package_key(key_str) {
+                if let Some(key_str) = key.as_str()
+                    && let Some((name, version)) = Self::parse_pnpm_package_key(key_str) {
                         versions.entry(name).or_insert(version);
                     }
-                }
             }
         }
 
@@ -121,9 +117,8 @@ impl LockfileParser {
     /// Parse pnpm package key like "express@4.18.2" or "@types/node@20.0.0"
     fn parse_pnpm_package_key(key: &str) -> Option<(String, Version)> {
         // Handle scoped packages: @scope/name@version
-        let (name, version_str) = if key.starts_with('@') {
+        let (name, version_str) = if let Some(rest) = key.strip_prefix('@') {
             // Find the second @ which separates name from version
-            let rest = &key[1..];
             if let Some(at_pos) = rest.find('@') {
                 let name = &key[..at_pos + 1];
                 let version_part = &rest[at_pos + 1..];
@@ -176,13 +171,12 @@ impl LockfileParser {
             }
 
             // Version line
-            if trimmed.starts_with("version") {
-                if let Some(version) = Self::parse_yarn_version_line(trimmed) {
+            if trimmed.starts_with("version")
+                && let Some(version) = Self::parse_yarn_version_line(trimmed) {
                     for pkg in &current_packages {
                         versions.entry(pkg.clone()).or_insert_with(|| version.clone());
                     }
                 }
-            }
         }
 
         Ok(versions)
@@ -207,8 +201,7 @@ impl LockfileParser {
 
     fn extract_package_name(spec: &str) -> Option<String> {
         // Handle @scope/name@version
-        if spec.starts_with('@') {
-            let rest = &spec[1..];
+        if let Some(rest) = spec.strip_prefix('@') {
             if let Some(at_pos) = rest.find('@') {
                 return Some(spec[..at_pos + 1].to_string());
             }

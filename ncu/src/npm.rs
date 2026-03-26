@@ -29,7 +29,7 @@ impl NpmClient {
 
     /// Get package info from npm registry
     pub async fn get_package(&self, name: &str) -> Result<PackageInfo> {
-        let url = format!("{}/{}", NPM_REGISTRY, name);
+        let url = format!("{NPM_REGISTRY}/{name}");
 
         let response = self
             .client
@@ -37,16 +37,16 @@ impl NpmClient {
             .header("Accept", "application/json")
             .send()
             .await
-            .with_context(|| format!("Failed to fetch package: {}", name))?;
+            .with_context(|| format!("Failed to fetch package: {name}"))?;
 
         if response.status() == reqwest::StatusCode::NOT_FOUND {
-            anyhow::bail!("Package '{}' not found on npm", name);
+            anyhow::bail!("Package '{name}' not found on npm");
         }
 
         let data: NpmPackageResponse = response
             .json()
             .await
-            .with_context(|| format!("Failed to parse npm response for: {}", name))?;
+            .with_context(|| format!("Failed to parse npm response for: {name}"))?;
 
         let mut versions: Vec<Version> = data
             .versions
@@ -63,7 +63,7 @@ impl NpmClient {
             .and_then(|v| Version::from_str(v).ok())
             .unwrap_or_else(|| versions.last().cloned().unwrap_or_else(|| Version::new(0, 0, 0)));
 
-        let latest_stable = versions.iter().filter(|v| !v.is_prerelease()).last().cloned();
+        let latest_stable = versions.iter().rfind(|v| !v.is_prerelease()).cloned();
 
         Ok(PackageInfo {
             name: data.name,

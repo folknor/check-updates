@@ -71,12 +71,11 @@ impl DependencyResolver {
         };
 
         // Check if in_range is an update
-        if let Some(ir) = in_range {
-            if ir > current {
+        if let Some(ir) = in_range
+            && ir > current {
                 let spec = current_spec.with_version(ir);
                 return (Some(ir.clone()), Some(spec));
             }
-        }
 
         // No in-range update, check if latest is an update
         if latest > current {

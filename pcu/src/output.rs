@@ -40,7 +40,7 @@ impl GlobalTableRenderer {
                         .unwrap_or_else(|| "unknown".to_string());
                     pip_by_python
                         .entry(py_version)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(check);
                 }
             }
@@ -72,7 +72,7 @@ impl GlobalTableRenderer {
                 println!();
             }
             first_group = false;
-            let header = format!("pip --user (Python {}):", py_version);
+            let header = format!("pip --user (Python {py_version}):");
             self.render_group_or_uptodate(&header, pip_checks);
         }
     }
@@ -82,7 +82,7 @@ impl GlobalTableRenderer {
         // Filter to only those with updates
         let updates: Vec<&GlobalCheck> = checks.iter().filter(|c| c.has_update).copied().collect();
 
-        println!("{}", header);
+        println!("{header}");
 
         if updates.is_empty() {
             println!("  All packages up to date.");
@@ -107,7 +107,7 @@ impl GlobalTableRenderer {
 
         // Sort checks by package name
         let mut sorted_checks = checks.to_vec();
-        sorted_checks.sort_by(|a, b| a.package.name.to_lowercase().cmp(&b.package.name.to_lowercase()));
+        sorted_checks.sort_by_key(|a| a.package.name.to_lowercase());
 
         // Print each row (indented)
         for check in sorted_checks {
@@ -133,7 +133,7 @@ impl GlobalTableRenderer {
                         "patch".to_string()
                     }
                 }
-                None => "".to_string(),
+                None => String::new(),
             };
 
             println!(
@@ -184,7 +184,7 @@ impl UvPythonTableRenderer {
             .unwrap_or(0);
 
         // Print rows sorted by series
-        let mut sorted = updates.to_vec();
+        let mut sorted = updates.clone();
         sorted.sort_by(|a, b| a.series.cmp(&b.series));
 
         for check in sorted {
@@ -204,7 +204,7 @@ impl UvPythonTableRenderer {
                 "  {:<series_w$}  {:>inst_w$} → {}  {}",
                 check.series,
                 check.installed_version.to_string(),
-                check.latest_version.to_string(),
+                check.latest_version,
                 severity_str,
                 series_w = max_series,
                 inst_w = max_installed,

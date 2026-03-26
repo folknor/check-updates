@@ -8,6 +8,9 @@ repository.workspace = true
 keywords = ["python", "dependencies", "pip", "uv", "conda"]
 categories = ["command-line-utilities", "development-tools"]
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "pcu"
 path = "src/main.rs"

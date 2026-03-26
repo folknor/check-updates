@@ -23,11 +23,11 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     // Validate project path exists
     if !project_path.exists() {
-        anyhow::bail!("Project path does not exist: {:?}", project_path);
+        anyhow::bail!("Project path does not exist: {project_path:?}");
     }
 
     if !project_path.is_dir() {
-        anyhow::bail!("Project path is not a directory: {:?}", project_path);
+        anyhow::bail!("Project path is not a directory: {project_path:?}");
     }
 
     // 1. Detect Cargo.toml
@@ -35,7 +35,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     let detected_files = detector.detect()?;
 
     if detected_files.is_empty() {
-        println!("No Cargo.toml found in {:?}", project_path);
+        println!("No Cargo.toml found in {project_path:?}");
         return Ok(());
     }
 
@@ -77,7 +77,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
             .template(
                 "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
             )
-            .unwrap()
+            .expect("valid progress template")
             .progress_chars("#>-"),
     );
 
@@ -85,7 +85,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     let cratesio_result = cratesio_client
         .get_packages(&package_names, move |current, _total| {
-            let pb = progress_bar_clone.lock().unwrap();
+            let pb = progress_bar_clone.lock().expect("lock poisoned");
             pb.set_position(current as u64);
         })
         .await?;
@@ -126,7 +126,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
             let key = format!(
                 "{}:{}",
                 c.dependency.name,
-                c.target.as_ref().map(|v| v.to_string()).unwrap_or_default()
+                c.target.as_ref().map(std::string::ToString::to_string).unwrap_or_default()
             );
             seen.insert(key)
         })

@@ -2,7 +2,7 @@ use check_updates_core::Version;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use std::str::FromStr;
 use toml::Value;
 
@@ -15,7 +15,7 @@ impl CargoLockParser {
     }
 
     /// Parse Cargo.lock and return a map of package name to installed version
-    pub fn parse(&self, path: &PathBuf) -> Result<HashMap<String, Version>> {
+    pub fn parse(&self, path: &Path) -> Result<HashMap<String, Version>> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
 
@@ -30,8 +30,8 @@ impl CargoLockParser {
                 if let (Some(name), Some(version_str)) = (
                     package.get("name").and_then(|v| v.as_str()),
                     package.get("version").and_then(|v| v.as_str()),
-                ) {
-                    if let Ok(version) = Version::from_str(version_str) {
+                )
+                    && let Ok(version) = Version::from_str(version_str) {
                         // Note: There can be multiple versions of the same crate
                         // We'll store the highest version
                         versions
@@ -43,7 +43,6 @@ impl CargoLockParser {
                             })
                             .or_insert(version);
                     }
-                }
             }
         }
 
@@ -51,7 +50,7 @@ impl CargoLockParser {
     }
 
     /// Find Cargo.lock in project and parse it
-    pub fn find_and_parse(&self, project_path: &PathBuf) -> Result<HashMap<String, Version>> {
+    pub fn find_and_parse(&self, project_path: &Path) -> Result<HashMap<String, Version>> {
         let lock_path = project_path.join("Cargo.lock");
 
         if lock_path.exists() {
