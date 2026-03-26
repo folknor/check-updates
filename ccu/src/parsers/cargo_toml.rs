@@ -1,16 +1,51 @@
 use super::{Dependency, DependencyParser};
 use check_updates_core::VersionSpec;
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use toml::Value;
 
 /// Parser for Cargo.toml files
-pub struct CargoTomlParser;
+pub struct CargoTomlParser {
+    /// Workspace dependency versions resolved from root Cargo.toml [workspace.dependencies]
+    workspace_deps: HashMap<String, String>,
+    /// Path to the root Cargo.toml (for correct source_file attribution on workspace deps)
+    workspace_root: Option<std::path::PathBuf>,
+}
 
 impl CargoTomlParser {
     pub fn new() -> Self {
-        Self
+        Self {
+            workspace_deps: HashMap::new(),
+            workspace_root: None,
+        }
+    }
+
+    /// Extract [workspace.dependencies] version map from a root Cargo.toml path.
+    /// Call this before parsing member crates so `.workspace = true` deps can be resolved.
+    pub fn load_workspace_deps(&mut self, root_cargo_toml: &Path) -> Result<()> {
+        let content = fs::read_to_string(root_cargo_toml)
+            .with_context(|| format!("Failed to read {}", root_cargo_toml.display()))?;
+
+        let parsed: Value = toml::from_str(&content)
+            .with_context(|| format!("Failed to parse TOML in {}", root_cargo_toml.display()))?;
+
+        if let Some(workspace) = parsed.get("workspace").and_then(|v| v.as_table())
+            && let Some(deps) = workspace.get("dependencies").and_then(|v| v.as_table())
+        {
+            for (name, value) in deps {
+                if let Some(version) = self.extract_version(value) {
+                    self.workspace_deps.insert(name.clone(), version);
+                }
+            }
+        }
+
+        if !self.workspace_deps.is_empty() {
+            self.workspace_root = Some(root_cargo_toml.to_path_buf());
+        }
+
+        Ok(())
     }
 
     /// Parse dependencies from a TOML table
@@ -23,10 +58,34 @@ impl CargoTomlParser {
         let mut deps = Vec::new();
 
         for (name, value) in table {
-            if let Some(version_str) = self.extract_version(value) {
-                // Find line number for this dependency
-                let line_number = self.find_line_number(content, name, &version_str);
-                let original_line = content
+            let is_workspace_ref = Self::is_workspace_reference(value);
+
+            if let Some(version_str) = self.extract_version_or_workspace(name, value) {
+                // For workspace references resolved from root, point source_file
+                // to the root Cargo.toml where the version is actually defined
+                let effective_source = if is_workspace_ref {
+                    self.workspace_root.as_deref().unwrap_or(source_file)
+                } else {
+                    source_file
+                };
+
+                // For workspace refs, find the line in the root content instead
+                let (effective_content, line_number) = if is_workspace_ref
+                    && let Some(root_path) = &self.workspace_root
+                    && root_path != source_file
+                {
+                    if let Ok(root_content) = fs::read_to_string(root_path) {
+                        let ln = self.find_line_number(&root_content, name, &version_str);
+                        (Some(root_content), ln)
+                    } else {
+                        (None, self.find_line_number(content, name, &version_str))
+                    }
+                } else {
+                    (None, self.find_line_number(content, name, &version_str))
+                };
+
+                let line_content = effective_content.as_deref().unwrap_or(content);
+                let original_line = line_content
                     .lines()
                     .nth(line_number.saturating_sub(1))
                     .unwrap_or("")
@@ -36,7 +95,7 @@ impl CargoTomlParser {
                     deps.push(Dependency {
                         name: name.clone(),
                         version_spec,
-                        source_file: source_file.to_path_buf(),
+                        source_file: effective_source.to_path_buf(),
                         line_number,
                         original_line,
                     });
@@ -45,6 +104,15 @@ impl CargoTomlParser {
         }
 
         deps
+    }
+
+    /// Check if a dependency value is a workspace reference (`.workspace = true`)
+    fn is_workspace_reference(value: &Value) -> bool {
+        if let Value::Table(table) = value {
+            table.get("workspace").and_then(Value::as_bool) == Some(true)
+        } else {
+            false
+        }
     }
 
     /// Parse a Cargo version spec (bare versions are caret in Cargo semantics)
@@ -64,7 +132,29 @@ impl CargoTomlParser {
         VersionSpec::parse(&format!("^{s}")).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
-    /// Extract version string from a dependency value
+    /// Extract version string from a dependency value, resolving `.workspace = true`
+    /// against the loaded workspace dependencies when needed.
+    fn extract_version_or_workspace(&self, name: &str, value: &Value) -> Option<String> {
+        // First try direct version extraction
+        if let Some(version) = self.extract_version(value) {
+            return Some(version);
+        }
+
+        // Check for .workspace = true (shows up as a table with workspace = true)
+        if let Value::Table(table) = value
+            && table.get("workspace").and_then(Value::as_bool) == Some(true)
+        {
+            // Skip path/git deps even if workspace = true
+            if table.contains_key("git") || table.contains_key("path") {
+                return None;
+            }
+            return self.workspace_deps.get(name).cloned();
+        }
+
+        None
+    }
+
+    /// Extract version string from a dependency value (without workspace resolution)
     fn extract_version(&self, value: &Value) -> Option<String> {
         match value {
             // Simple string version: serde = "1.0"
@@ -164,8 +254,9 @@ impl DependencyParser for CargoTomlParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::io::Write;
-    use tempfile::NamedTempFile;
+    use tempfile::{NamedTempFile, TempDir};
 
     #[test]
     fn test_parse_simple_deps() -> Result<()> {
@@ -244,6 +335,90 @@ cc = "1.0"
         assert!(deps.iter().any(|d| d.name == "serde"));
         assert!(deps.iter().any(|d| d.name == "tempfile"));
         assert!(deps.iter().any(|d| d.name == "cc"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_workspace_dep_resolution() -> Result<()> {
+        let tmp = TempDir::new()?;
+
+        // Create root Cargo.toml with [workspace.dependencies]
+        let root_toml = tmp.path().join("Cargo.toml");
+        fs::write(
+            &root_toml,
+            r#"
+[workspace]
+members = ["member"]
+
+[workspace.dependencies]
+serde = { version = "1.0.200", features = ["derive"] }
+tokio = "1.38"
+local-dep = { path = "../local" }
+"#,
+        )?;
+
+        // Create member Cargo.toml with .workspace = true refs
+        let member_dir = tmp.path().join("member");
+        fs::create_dir(&member_dir)?;
+        let member_toml = member_dir.join("Cargo.toml");
+        fs::write(
+            &member_toml,
+            r#"
+[package]
+name = "member"
+version = "0.1.0"
+
+[dependencies]
+serde.workspace = true
+tokio.workspace = true
+local-dep.workspace = true
+direct-dep = "2.0"
+"#,
+        )?;
+
+        let mut parser = CargoTomlParser::new();
+        parser.load_workspace_deps(&root_toml)?;
+
+        let deps = parser.parse(&member_toml)?;
+
+        // serde and tokio resolved from workspace, direct-dep is direct,
+        // local-dep is a path dep and should be skipped
+        assert_eq!(deps.len(), 3, "deps: {:?}", deps.iter().map(|d| &d.name).collect::<Vec<_>>());
+
+        let serde_dep = deps.iter().find(|d| d.name == "serde").expect("serde");
+        assert_eq!(serde_dep.version_spec.version_string().expect("version"), "1.0.200");
+        // source_file should point to root Cargo.toml for workspace deps
+        assert_eq!(serde_dep.source_file, root_toml);
+
+        let tokio_dep = deps.iter().find(|d| d.name == "tokio").expect("tokio");
+        assert_eq!(tokio_dep.version_spec.version_string().expect("version"), "1.38");
+
+        let direct = deps.iter().find(|d| d.name == "direct-dep").expect("direct-dep");
+        assert_eq!(direct.source_file, member_toml);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_workspace_deps_without_load() -> Result<()> {
+        // Without calling load_workspace_deps, .workspace = true deps should be silently skipped
+        let mut file = NamedTempFile::new()?;
+        writeln!(
+            file,
+            r#"
+[dependencies]
+serde.workspace = true
+direct = "1.0"
+"#
+        )?;
+
+        let parser = CargoTomlParser::new();
+        let deps = parser.parse(&file.path().to_path_buf())?;
+
+        // Only direct dep should be found
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "direct");
 
         Ok(())
     }

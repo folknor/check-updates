@@ -40,8 +40,15 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     }
 
     // 2. Parse Cargo.toml
-    let cargo_toml_parser = CargoTomlParser::new();
+    let mut cargo_toml_parser = CargoTomlParser::new();
     let lockfile_parser = CargoLockParser::new();
+
+    // Load workspace dependency versions from root so member crates'
+    // `.workspace = true` references can be resolved
+    let root_cargo_toml = project_path.join("Cargo.toml");
+    if root_cargo_toml.exists() {
+        cargo_toml_parser.load_workspace_deps(&root_cargo_toml)?;
+    }
 
     let mut all_dependencies = Vec::new();
 
