@@ -2,6 +2,9 @@
 
 Check for outdated dependencies. Supports Python, Rust, and npm ecosystems.
 
+Built with LLMs. See [LLM.md](LLM.md).
+
+
 ## Install
 
 ```
