@@ -18,6 +18,7 @@ Run `ncu` in a Node.js project directory to see outdated dependencies. Supports 
 
 | Flag | Description |
 |------|-------------|
+| `-g` | Check globally installed packages (npm only for now) |
 | `-u` | Update `package.json` (patch updates only) |
 | `-m` | Include minor updates (use with `-u` as `-um`) |
 | `-f` | Force update all to absolute latest (use with `-u` as `-uf`) |

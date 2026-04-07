@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `ncu -g` flag to check globally installed npm packages
 - Crate READMEs for crates.io landing pages
 
 ### Changed

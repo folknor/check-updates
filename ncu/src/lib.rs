@@ -1,6 +1,8 @@
 pub mod cli;
 pub mod detector;
+pub mod global;
 pub mod npm;
+pub mod output;
 pub mod parsers;
 pub mod updater;
 

@@ -6,8 +6,12 @@ use std::path::PathBuf;
 #[command(name = "ncu")]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
+    /// Check globally installed packages (npm)
+    #[arg(short, long)]
+    pub global: bool,
+
     /// Path to project directory (defaults to current directory)
-    #[arg(value_name = "PATH")]
+    #[arg(value_name = "PATH", conflicts_with = "global")]
     pub path: Option<PathBuf>,
 
     /// Update package.json (patch updates only by default)
