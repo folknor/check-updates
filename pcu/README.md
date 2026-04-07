@@ -42,6 +42,10 @@ Run -u to upgrade patch, -um to upgrade patch+minors, and -uf to force upgrade a
 - `pyproject.toml` (Poetry, PDM, uv, and standard `[project]` dependencies)
 - `environment.yml` / `environment.yaml` (Conda)
 
+## Known limitations
+
+- 4-segment PEP 440 compatible release constraints (`~=1.4.5.0`) are not fully supported. The version parser only stores major.minor.patch, so `~=1.4.5.0` is treated as `~=1.4.5`. This is unlikely to matter in practice.
+
 ## Related
 
 Part of the [check-updates](https://github.com/folknor/check-updates) family:

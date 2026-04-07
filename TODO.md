@@ -1,5 +1,9 @@
 # TODO
 
+## PEP 440 compatible release (~=)
+
+- **4-segment `~=` is not fully supported.** The `Version` struct only stores major.minor.patch, so `~=1.4.5.0` is treated as `~=1.4.5` (same major+minor) when PEP 440 says it should be capped at `1.4.5.*`. This would require adding a 4th version segment to `Version`. Unlikely to matter in practice — 4-segment compatible releases are rare.
+
 ## Version spec handling
 
 - **`ccu --update` can change constraint semantics.** `with_version()` in `core/src/version.rs` drops operators for `^`, `~`, `>=`, ranges, etc. A dependency declared as `>=1.0,<2.0` gets rewritten to just `1.x.y`, losing the upper bound. `^1.0` becomes `1.x.y`, changing the lower bound. Affects `ccu/src/updater.rs` and `core/src/version.rs:364`.
