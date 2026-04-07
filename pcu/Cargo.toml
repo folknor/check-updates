@@ -1,15 +1,20 @@
 [package]
-name = "pcu"
+name = "python-check-updates"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Check for outdated Python dependencies"
+readme = "README.md"
 repository.workspace = true
 keywords = ["python", "dependencies", "pip", "uv", "conda"]
 categories = ["command-line-utilities", "development-tools"]
 
 [lints]
 workspace = true
+
+[lib]
+name = "pcu"
+path = "src/lib.rs"
 
 [[bin]]
 name = "pcu"

@@ -1,15 +1,20 @@
 [package]
-name = "ccu"
+name = "cargo-check-updates"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Check for outdated Rust dependencies"
+readme = "README.md"
 repository.workspace = true
 keywords = ["rust", "dependencies", "cargo", "crates"]
 categories = ["command-line-utilities", "development-tools"]
 
 [lints]
 workspace = true
+
+[lib]
+name = "ccu"
+path = "src/lib.rs"
 
 [[bin]]
 name = "ccu"

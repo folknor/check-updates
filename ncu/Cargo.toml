@@ -1,15 +1,20 @@
 [package]
-name = "ncu"
+name = "node-check-updates"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Check for outdated npm dependencies"
+readme = "README.md"
 repository.workspace = true
 keywords = ["npm", "pnpm", "yarn", "bun", "dependencies"]
 categories = ["command-line-utilities", "development-tools"]
 
 [lints]
 workspace = true
+
+[lib]
+name = "ncu"
+path = "src/lib.rs"
 
 [[bin]]
 name = "ncu"
