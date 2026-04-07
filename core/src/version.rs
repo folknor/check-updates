@@ -314,10 +314,21 @@ impl VersionSpec {
                 version >= v && version.major == v.major && version.minor == v.minor
             }
             VersionSpec::Compatible(v) => {
-                version >= v && version.major == v.major && version.minor == v.minor
+                // PEP 440: ~=X.Y means >=X.Y, <(X+1).0.0 (lock major only)
+                //          ~=X.Y.Z means >=X.Y.Z, <X.(Y+1).0 (lock major+minor)
+                let dot_count = v.original.chars().filter(|c| *c == '.').count();
+                if dot_count < 2 {
+                    // ~=X.Y form: only lock on major
+                    version >= v && version.major == v.major
+                } else {
+                    // ~=X.Y.Z form: lock on major+minor
+                    version >= v && version.major == v.major && version.minor == v.minor
+                }
             }
             VersionSpec::Wildcard { prefix, .. } => {
-                version.original.starts_with(prefix)
+                // Must match prefix followed by a dot (or end), so 1.2.* doesn't match 1.20.x
+                version.original.starts_with(&format!("{prefix}."))
+                    || version.original == *prefix
             }
             VersionSpec::NotEqual(v) => version != v,
             VersionSpec::Complex(_) => true, // Can't evaluate complex constraints

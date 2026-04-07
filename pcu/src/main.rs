@@ -118,7 +118,7 @@ async fn run_global_mode(args: &Args) -> Result<()> {
                     .filter(|v| v.major == package.installed_version.major)
                     .max()
                     .cloned()
-                    .unwrap_or_else(|| info.latest.clone())
+                    .unwrap_or_else(|| package.installed_version.clone())
             } else {
                 // Default/force_latest: absolute latest (no constraints in global mode)
                 info.latest.clone()

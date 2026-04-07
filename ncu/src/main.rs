@@ -57,7 +57,12 @@ async fn run_global_mode(args: &Args) -> Result<()> {
             .progress_chars("=>-"),
     );
 
-    let results = client.get_packages(&package_names).await;
+    let pb = progress.clone();
+    let results = client
+        .get_packages(&package_names, move |done, _total| {
+            pb.set_position(done as u64);
+        })
+        .await;
     progress.finish_and_clear();
 
     let mut package_infos: HashMap<String, _> = HashMap::new();
@@ -85,7 +90,7 @@ async fn run_global_mode(args: &Args) -> Result<()> {
                     .filter(|v| v.major == package.installed_version.major)
                     .max()
                     .cloned()
-                    .unwrap_or_else(|| info.latest.clone())
+                    .unwrap_or_else(|| package.installed_version.clone())
             } else {
                 info.latest.clone()
             };
@@ -185,7 +190,12 @@ async fn run_project_mode(args: &Args) -> Result<()> {
             .progress_chars("=>-"),
     );
 
-    let results = client.get_packages(&package_names).await;
+    let pb = progress.clone();
+    let results = client
+        .get_packages(&package_names, move |done, _total| {
+            pb.set_position(done as u64);
+        })
+        .await;
     progress.finish_and_clear();
 
     // Build package info map

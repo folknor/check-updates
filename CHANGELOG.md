@@ -15,9 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Renamed crates for publishing: `cargo-check-updates`, `python-check-updates`, `node-check-updates` (binaries remain `ccu`, `pcu`, `ncu`)
 - Switched TLS backend from rustls to native-tls, significantly reducing dependency count
 - Trimmed tokio features to only what's needed (rt-multi-thread, macros, sync)
+- ncu npm registry queries now rate-limited (semaphore of 10) with working progress bar
 
 ### Fixed
 - ccu now correctly identifies outdated dependencies when multiple versions of the same crate exist in `Cargo.lock` (e.g. a direct dep at 0.28.x and a transitive dep at 0.29.x)
+- Wildcard version specs (`==1.2.*`) no longer incorrectly match `1.20.x`
+- Compatible release (`~=X.Y`) now correctly allows any same-major version per PEP 440
+- `pcu -gm` and `ncu -gm` no longer fall back to latest when no same-major version exists
 
 ## [0.2.0] - 2025-12-30
 

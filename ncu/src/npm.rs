@@ -3,6 +3,8 @@ use check_updates_core::{PackageInfo, Version};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 const NPM_REGISTRY: &str = "https://registry.npmjs.org";
 
@@ -14,6 +16,7 @@ struct NpmPackageResponse {
     versions: HashMap<String, serde_json::Value>,
 }
 
+#[derive(Clone)]
 pub struct NpmClient {
     client: reqwest::Client,
     include_prerelease: bool,
@@ -73,30 +76,42 @@ impl NpmClient {
         })
     }
 
-    /// Get multiple packages concurrently
-    pub async fn get_packages(&self, names: &[String]) -> Vec<(String, Result<PackageInfo>)> {
-        let futures: Vec<_> = names
-            .iter()
-            .map(|name| {
-                let name = name.clone();
-                let client = self.clone();
-                async move {
-                    let result = client.get_package(&name).await;
-                    (name, result)
-                }
-            })
-            .collect();
+    /// Get multiple packages concurrently with progress callback and rate limiting
+    pub async fn get_packages(
+        &self,
+        names: &[String],
+        progress_callback: impl Fn(usize, usize) + Send + Sync + 'static,
+    ) -> Vec<(String, Result<PackageInfo>)> {
+        let total = names.len();
+        let progress_callback = Arc::new(progress_callback);
+        let semaphore = Arc::new(Semaphore::new(10));
 
-        futures::future::join_all(futures).await
-    }
-}
+        let mut tasks = Vec::new();
 
-impl Clone for NpmClient {
-    fn clone(&self) -> Self {
-        Self {
-            client: self.client.clone(),
-            include_prerelease: self.include_prerelease,
+        for name in names {
+            let client = self.clone();
+            let name = name.clone();
+            let semaphore = Arc::clone(&semaphore);
+
+            let task = tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.expect("semaphore closed");
+                let result = client.get_package(&name).await;
+                (name, result)
+            });
+
+            tasks.push(task);
         }
+
+        let mut results = Vec::new();
+        for (i, task) in tasks.into_iter().enumerate() {
+            match task.await {
+                Ok(result) => results.push(result),
+                Err(e) => results.push(("unknown".to_string(), Err(anyhow::anyhow!("Task failed: {e}")))),
+            }
+            progress_callback(i + 1, total);
+        }
+
+        results
     }
 }
 
@@ -109,7 +124,7 @@ mod tests {
         let client = NpmClient::new(false);
         let result = client.get_package("express").await;
         assert!(result.is_ok());
-        let info = result.unwrap();
+        let info = result.expect("should succeed");
         assert_eq!(info.name, "express");
         assert!(!info.versions.is_empty());
     }
