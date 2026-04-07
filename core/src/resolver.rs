@@ -67,7 +67,10 @@ impl DependencyResolver {
     ) -> (Option<Version>, Option<VersionSpec>) {
         let current = match current {
             Some(c) => c,
-            None => return (None, None),
+            // No current version (no lockfile, no base_version for Complex specs).
+            // Still report latest as target so the dependency shows up in review,
+            // but with no spec (can't determine severity or offer a rewrite).
+            None => return (Some(latest.clone()), None),
         };
 
         // Check if in_range is an update
