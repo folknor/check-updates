@@ -42,10 +42,11 @@ impl FileUpdater {
                 }
             };
 
-            if let Some(spec) = version_spec {
-                // Use version_string() for Cargo.toml format (without "==" prefix)
+            if let Some(spec) = version_spec
+                && spec.is_rewritable() {
+                // Use Cargo-specific serialization (bare version = caret, = for pin, etc.)
                 // Strip build metadata (+...) since it's not valid in Cargo.toml version requirements
-                let new_version = spec.version_string().unwrap_or_else(|| spec.to_string());
+                let new_version = spec.to_cargo_string().unwrap_or_else(|| spec.to_string());
                 let new_version = match new_version.find('+') {
                     Some(idx) => new_version[..idx].to_string(),
                     None => new_version,

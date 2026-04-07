@@ -73,14 +73,22 @@ impl DependencyResolver {
         // Check if in_range is an update
         if let Some(ir) = in_range
             && ir > current {
-                let spec = current_spec.with_version(ir);
-                return (Some(ir.clone()), Some(spec));
+                let spec = if current_spec.is_rewritable() {
+                    Some(current_spec.with_version(ir))
+                } else {
+                    None
+                };
+                return (Some(ir.clone()), spec);
             }
 
         // No in-range update, check if latest is an update
         if latest > current {
-            let spec = current_spec.with_version(latest);
-            return (Some(latest.clone()), Some(spec));
+            let spec = if current_spec.is_rewritable() {
+                Some(current_spec.with_version(latest))
+            } else {
+                None
+            };
+            return (Some(latest.clone()), spec);
         }
 
         (None, None)
@@ -95,7 +103,7 @@ impl DependencyResolver {
     ) -> Option<VersionSpec> {
         let current = current?;
 
-        if latest > current {
+        if latest > current && current_spec.is_rewritable() {
             Some(current_spec.with_version(latest))
         } else {
             None

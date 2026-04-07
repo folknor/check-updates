@@ -49,7 +49,8 @@ impl FileUpdater {
                 }
             };
 
-            if let Some(spec) = version_spec {
+            if let Some(spec) = version_spec
+                && spec.is_rewritable() {
                 let new_version = spec.to_string();
                 file_updates
                     .entry(check.dependency.source_file.clone())

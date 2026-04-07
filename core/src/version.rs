@@ -331,7 +331,7 @@ impl VersionSpec {
                     || version.original == *prefix
             }
             VersionSpec::NotEqual(v) => version != v,
-            VersionSpec::Complex(_) => true, // Can't evaluate complex constraints
+            VersionSpec::Complex(_) => false, // Can't evaluate complex constraints; don't claim in-range
         }
     }
 
@@ -392,6 +392,31 @@ impl VersionSpec {
         }
     }
 
+    /// Serialize to Cargo.toml requirement syntax.
+    /// Cargo conventions: bare version = caret, `=` for exact pin, `~` for tilde, etc.
+    pub fn to_cargo_string(&self) -> Option<String> {
+        match self {
+            VersionSpec::Caret(v) => Some(v.to_string()), // bare = caret in Cargo
+            VersionSpec::Tilde(v) => Some(format!("~{v}")),
+            VersionSpec::Pinned(v) => Some(format!("={v}")), // Cargo uses single =
+            VersionSpec::Minimum(v) => Some(format!(">={v}")),
+            VersionSpec::Maximum(v) => Some(format!("<={v}")),
+            VersionSpec::GreaterThan(v) => Some(format!(">{v}")),
+            VersionSpec::LessThan(v) => Some(format!("<{v}")),
+            VersionSpec::Range { min, max } => Some(format!(">={min}, <{max}")),
+            VersionSpec::Wildcard { prefix, .. } => Some(format!("{prefix}.*")),
+            VersionSpec::NotEqual(v) => Some(format!("!={v}")),
+            VersionSpec::Compatible(v) => Some(v.to_string()), // not a Cargo concept, treat as bare
+            VersionSpec::Complex(s) => Some(s.clone()),
+            VersionSpec::Any => Some("*".to_string()),
+        }
+    }
+
+    /// Returns true if this spec can be safely rewritten by an updater
+    pub fn is_rewritable(&self) -> bool {
+        !matches!(self, VersionSpec::Complex(_) | VersionSpec::Any)
+    }
+
     /// Create a new version spec with updated version but same constraint type
     pub fn with_version(&self, new_version: &Version) -> VersionSpec {
         match self {
@@ -417,10 +442,16 @@ impl VersionSpec {
             VersionSpec::Caret(_) => VersionSpec::Caret(new_version.clone()),
             VersionSpec::Tilde(_) => VersionSpec::Tilde(new_version.clone()),
             VersionSpec::Compatible(_) => VersionSpec::Compatible(new_version.clone()),
-            VersionSpec::Wildcard { pattern, .. } => {
-                // Update wildcard to new major.minor.*
+            VersionSpec::Wildcard { prefix, pattern } => {
+                // Preserve the original wildcard precision:
+                // "1.*" (1 segment) → "2.*", "1.2.*" (2 segments) → "1.3.*"
+                let segments = prefix.split('.').count();
+                let new_prefix = match segments {
+                    0 | 1 => format!("{}", new_version.major),
+                    _ => format!("{}.{}", new_version.major, new_version.minor),
+                };
                 VersionSpec::Wildcard {
-                    prefix: format!("{}.{}", new_version.major, new_version.minor),
+                    prefix: new_prefix,
                     pattern: pattern.clone(),
                 }
             }

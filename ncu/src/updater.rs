@@ -36,7 +36,8 @@ impl FileUpdater {
                 }
             };
 
-            if let Some(spec) = version_spec {
+            if let Some(spec) = version_spec
+                && spec.is_rewritable() {
                 // For npm, preserve the original prefix (^, ~, etc.)
                 let new_version = spec.to_string();
                 file_updates
