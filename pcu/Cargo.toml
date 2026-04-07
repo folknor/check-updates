@@ -30,7 +30,7 @@ thiserror.workspace = true
 
 # Python-specific
 serde_yaml = "0.9"
-semver = "1"
+semver = "1.0.28"
 regex = "1.12.3"
 rayon = "1"
 url = "2"
