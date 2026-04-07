@@ -10,7 +10,7 @@ use ccu::cratesio::CratesIoClient;
 use ccu::detector::ProjectDetector;
 use ccu::parsers::{CargoLockParser, CargoTomlParser, DependencyParser};
 use ccu::updater::FileUpdater;
-use check_updates_core::{DependencyCheck, DependencyResolver, TableRenderer};
+use check_updates_core::{DependencyCheck, DependencyResolver, TableRenderer, Version};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -116,7 +116,19 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     for dependency in &all_dependencies {
         if let Some(package_info) = package_infos.get(&dependency.name) {
-            let installed = installed_versions.get(&dependency.name);
+            let installed = installed_versions.get(&dependency.name).and_then(|versions| {
+                // When multiple versions exist in Cargo.lock (e.g. direct + transitive),
+                // pick the highest version that satisfies the declared spec
+                let mut matching: Vec<&Version> = versions
+                    .iter()
+                    .filter(|v| dependency.version_spec.satisfies(v))
+                    .collect();
+                matching.sort();
+                matching.last().copied().or_else(|| {
+                    // Fallback: highest overall (shouldn't happen in practice)
+                    versions.iter().max()
+                })
+            });
             let check = resolver.resolve(dependency, package_info, installed);
             checks.push(check);
         }

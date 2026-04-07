@@ -14,15 +14,15 @@ impl CargoLockParser {
         Self
     }
 
-    /// Parse Cargo.lock and return a map of package name to installed version
-    pub fn parse(&self, path: &Path) -> Result<HashMap<String, Version>> {
+    /// Parse Cargo.lock and return a map of package name to all installed versions
+    pub fn parse(&self, path: &Path) -> Result<HashMap<String, Vec<Version>>> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
 
         let parsed: Value = toml::from_str(&content)
             .with_context(|| format!("Failed to parse TOML in {}", path.display()))?;
 
-        let mut versions = HashMap::new();
+        let mut versions: HashMap<String, Vec<Version>> = HashMap::new();
 
         // Parse [[package]] sections
         if let Some(packages) = parsed.get("package").and_then(|v| v.as_array()) {
@@ -32,16 +32,10 @@ impl CargoLockParser {
                     package.get("version").and_then(|v| v.as_str()),
                 )
                     && let Ok(version) = Version::from_str(version_str) {
-                        // Note: There can be multiple versions of the same crate
-                        // We'll store the highest version
                         versions
                             .entry(name.to_string())
-                            .and_modify(|existing: &mut Version| {
-                                if version > *existing {
-                                    *existing = version.clone();
-                                }
-                            })
-                            .or_insert(version);
+                            .or_default()
+                            .push(version);
                     }
             }
         }
@@ -50,7 +44,7 @@ impl CargoLockParser {
     }
 
     /// Find Cargo.lock in project and parse it
-    pub fn find_and_parse(&self, project_path: &Path) -> Result<HashMap<String, Version>> {
+    pub fn find_and_parse(&self, project_path: &Path) -> Result<HashMap<String, Vec<Version>>> {
         let lock_path = project_path.join("Cargo.lock");
 
         if lock_path.exists() {
@@ -100,8 +94,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         let versions = parser.parse(&file.path().to_path_buf())?;
 
         assert_eq!(versions.len(), 2);
-        assert_eq!(versions.get("serde").unwrap().to_string(), "1.0.200");
-        assert_eq!(versions.get("tokio").unwrap().to_string(), "1.37.0");
+        assert_eq!(versions.get("serde").unwrap()[0].to_string(), "1.0.200");
+        assert_eq!(versions.get("tokio").unwrap()[0].to_string(), "1.37.0");
 
         Ok(())
     }
@@ -127,8 +121,12 @@ version = "2.0.60"
         let parser = CargoLockParser::new();
         let versions = parser.parse(&file.path().to_path_buf())?;
 
-        // Should have the highest version
-        assert_eq!(versions.get("syn").unwrap().to_string(), "2.0.60");
+        // Should have both versions
+        let syn_versions = versions.get("syn").expect("syn should be present");
+        assert_eq!(syn_versions.len(), 2);
+        let syn_strs: Vec<String> = syn_versions.iter().map(|v| v.to_string()).collect();
+        assert!(syn_strs.contains(&"1.0.109".to_string()));
+        assert!(syn_strs.contains(&"2.0.60".to_string()));
 
         Ok(())
     }
