@@ -1,4 +1,5 @@
 use check_updates_core::Version;
+use std::collections::HashMap;
 use std::process::Command;
 use std::str::FromStr;
 
@@ -47,49 +48,99 @@ pub fn detect_python_version() -> Option<Version> {
     None
 }
 
-/// Fetch the latest Python version from endoflife.date
-pub async fn fetch_latest_python_version() -> Option<Version> {
-    // Use the endoflife.date API - it's well-maintained and returns clean data
-    let url = "https://endoflife.date/api/python.json";
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .ok()?;
-
-    let response = client.get(url).send().await.ok()?;
-
-    if !response.status().is_success() {
+/// Fetch the latest Python version for a given series from uv python list
+///
+/// Uses uv's own list of available Python versions as the source of truth,
+/// since endoflife.date may report versions that uv hasn't built yet.
+pub fn fetch_latest_python_version(current: &Version) -> Option<Version> {
+    let output = Command::new("uv").args(["python", "list"]).output().ok()?;
+    if !output.status.success() {
         return None;
     }
 
-    let json: serde_json::Value = response.json().await.ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let current_series = format!("{}.{}", current.major, current.minor);
 
-    // The API returns an array of release cycles sorted by newest first
-    // Each cycle has a "latest" field with the latest version for that cycle
-    let cycles = json.as_array()?;
-
-    // Get the latest version from the first cycle (newest Python release line)
-    // Filter to only consider Python 3.x cycles
-    for cycle in cycles {
-        let cycle_name = cycle.get("cycle")?.as_str()?;
-        if cycle_name.starts_with("3.") {
-            let latest_str = cycle.get("latest")?.as_str()?;
-            if let Ok(version) = Version::from_str(latest_str) {
-                return Some(version);
+    // Find the highest version in the same series from uv's available list
+    let mut best: Option<Version> = None;
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let name = parts[0];
+        // Parse: "cpython-3.14.3-linux-x86_64-gnu"
+        let name_parts: Vec<&str> = name.split('-').collect();
+        if name_parts.len() < 2 || name_parts[0] != "cpython" {
+            continue;
+        }
+        if name.contains("+freethreaded") {
+            continue;
+        }
+        let version_str = name_parts[1];
+        if let Ok(version) = Version::from_str(version_str) {
+            let series = format!("{}.{}", version.major, version.minor);
+            if series == current_series {
+                if best.as_ref().is_none_or(|b| version > *b) {
+                    best = Some(version);
+                }
             }
         }
     }
 
-    None
+    best
+}
+
+/// Build a map of series -> latest version from uv python list output
+pub fn fetch_all_latest_python_versions() -> HashMap<String, Version> {
+    let mut versions: HashMap<String, Version> = HashMap::new();
+
+    let output = match Command::new("uv").args(["python", "list"]).output() {
+        Ok(o) if o.status.success() => o,
+        _ => return versions,
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let name = parts[0];
+        let name_parts: Vec<&str> = name.split('-').collect();
+        if name_parts.len() < 2 || name_parts[0] != "cpython" {
+            continue;
+        }
+        if name.contains("+freethreaded") {
+            continue;
+        }
+        let version_str = name_parts[1];
+        if let Ok(version) = Version::from_str(version_str) {
+            let series = format!("{}.{}", version.major, version.minor);
+            let entry = versions.entry(series).or_insert_with(|| version.clone());
+            if version > *entry {
+                *entry = version;
+            }
+        }
+    }
+
+    versions
 }
 
 /// Get Python info (current version and optionally latest available)
-pub async fn get_python_info(check_latest: bool) -> Option<PythonInfo> {
+pub fn get_python_info(check_latest: bool) -> Option<PythonInfo> {
     let current = detect_python_version()?;
 
     let latest = if check_latest {
-        fetch_latest_python_version().await
+        fetch_latest_python_version(&current)
     } else {
         None
     };

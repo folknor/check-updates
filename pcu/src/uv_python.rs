@@ -1,7 +1,6 @@
 use crate::global::UpgradeCommand;
 use check_updates_core::Version;
 use anyhow::Result;
-use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
@@ -46,12 +45,6 @@ impl UvPythonCheck {
     }
 }
 
-/// Response from endoflife.date API for a Python cycle
-#[derive(Debug, Deserialize)]
-struct PythonCycle {
-    cycle: String,      // "3.11", "3.12", etc.
-    latest: String,     // "3.11.14", "3.12.12", etc.
-}
 
 /// Discovery and checking for uv-managed Python installations
 pub struct UvPythonDiscovery {}
@@ -126,34 +119,17 @@ impl UvPythonDiscovery {
         Ok(versions)
     }
 
-    /// Fetch latest versions for all Python series from endoflife.date
-    async fn fetch_latest_python_versions(&self) -> Result<HashMap<String, Version>> {
-        let url = "https://endoflife.date/api/python.json";
-
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()?;
-
-        let response = client.get(url).send().await?;
-
-        if !response.status().is_success() {
-            anyhow::bail!("Failed to fetch Python version data");
-        }
-
-        let cycles: Vec<PythonCycle> = response.json().await?;
-
-        // Build map of "3.11" -> "3.11.14", "3.12" -> "3.12.12", etc.
-        let mut versions = HashMap::new();
-        for cycle in cycles {
-            if cycle.cycle.starts_with("3.") {
-                // Only Python 3.x
-                if let Ok(version) = Version::from_str(&cycle.latest) {
-                    versions.insert(cycle.cycle.clone(), version);
-                }
+    /// Build latest available versions per series from uv python list output
+    fn latest_versions_from_uv_list(&self, all_versions: &[UvPythonInfo]) -> HashMap<String, Version> {
+        let mut latest: HashMap<String, Version> = HashMap::new();
+        for info in all_versions {
+            let series = format!("{}.{}", info.version.major, info.version.minor);
+            let entry = latest.entry(series).or_insert_with(|| info.version.clone());
+            if info.version > *entry {
+                *entry = info.version.clone();
             }
         }
-
-        Ok(versions)
+        latest
     }
 
     /// Discover installed uv Python versions and check for updates
@@ -167,10 +143,13 @@ impl UvPythonDiscovery {
         };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let installed = self.parse_uv_python_list(&stdout)?;
+        let all_versions = self.parse_uv_python_list(&stdout)?;
+
+        // 2. Build latest available versions per series from uv's own list
+        let latest_versions = self.latest_versions_from_uv_list(&all_versions);
 
         // Filter to only installed versions
-        let installed: Vec<_> = installed
+        let installed: Vec<_> = all_versions
             .into_iter()
             .filter(|v| v.is_installed)
             .collect();
@@ -178,9 +157,6 @@ impl UvPythonDiscovery {
         if installed.is_empty() {
             return Ok(Vec::new());
         }
-
-        // 2. Fetch latest versions per series from endoflife.date
-        let latest_versions = self.fetch_latest_python_versions().await?;
 
         // 3. Build checks grouped by series
         let mut checks = Vec::new();

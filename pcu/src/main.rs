@@ -41,9 +41,9 @@ async fn run_global_mode(args: &Args) -> Result<()> {
     // 1. Discover global packages, fetch Python info, and check uv Python versions concurrently
     let discovery = GlobalPackageDiscovery::new(args.pre_release);
     let uv_python_discovery = UvPythonDiscovery::new();
-    let (packages, python_info, uv_python_checks) = tokio::join!(
+    let python_info = get_python_info(true);
+    let (packages, uv_python_checks) = tokio::join!(
         async { discovery.discover() },
-        get_python_info(true),
         async { uv_python_discovery.discover_and_check().await }
     );
 
@@ -251,14 +251,12 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     let progress_bar_clone = Arc::new(Mutex::new(progress_bar.clone()));
 
-    // Fetch package info and Python version concurrently
-    let (pypi_result, python_info) = tokio::join!(
-        pypi_client.get_packages(&package_names, move |current, _total| {
-            let pb = progress_bar_clone.lock().expect("lock poisoned");
-            pb.set_position(current as u64);
-        }),
-        get_python_info(true)
-    );
+    // Fetch package info and Python version
+    let python_info = get_python_info(true);
+    let pypi_result = pypi_client.get_packages(&package_names, move |current, _total| {
+        let pb = progress_bar_clone.lock().expect("lock poisoned");
+        pb.set_position(current as u64);
+    }).await;
 
     let pypi_result = pypi_result?;
     let package_infos = pypi_result.packages;
