@@ -19,6 +19,7 @@ cargo install --path ncu   # npm/pnpm/yarn/bun
 pcu [PATH]          # Check Python project
 pcu -g              # Check global packages (uv tools, pipx, pip --user)
 ccu [PATH]          # Check Cargo project
+ccu -g              # Check global cargo binaries (crates.io, git, local path)
 ncu [PATH]          # Check npm/pnpm/yarn/bun project
 ```
 
@@ -30,13 +31,15 @@ ncu [PATH]          # Check npm/pnpm/yarn/bun project
 | `-m` | Include minor updates (use with -u) |
 | `-f` | Force update to absolute latest |
 | `-p` | Include pre-release versions |
-| `-g` | Global mode (pcu only) |
+| `-g` | Global mode (pcu, ccu) |
 
 Combine flags: `-um` for patch+minor, `-uf` for everything.
 
 ## Notes
 
 **pcu -g**: For uv tools, only shows main tool packages, not dependencies within tool environments. Run `uv tool upgrade --all` to upgrade everything including dependencies.
+
+**ccu -g**: Reads `~/.cargo/.crates.toml` to discover installed binaries. For crates.io packages, checks for newer versions. For git installs, queries GitHub to show commits behind. For local path installs, runs `git fetch` and checks for commits behind upstream or dirty working trees.
 
 ## Supported Files
 

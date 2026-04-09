@@ -10,6 +10,10 @@ pub struct Args {
     #[arg(value_name = "PATH")]
     pub path: Option<PathBuf>,
 
+    /// Check globally installed cargo binaries for updates
+    #[arg(short, long)]
+    pub global: bool,
+
     /// Update Cargo.toml (patch updates only by default)
     #[arg(short, long)]
     pub update: bool,

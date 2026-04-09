@@ -8,6 +8,11 @@ use std::sync::{Arc, Mutex};
 use ccu::cli::Args;
 use ccu::cratesio::CratesIoClient;
 use ccu::detector::ProjectDetector;
+use ccu::global::{
+    check_git_updates, check_path_updates, generate_upgrade_commands, GlobalCheck,
+    GlobalPackageDiscovery, GlobalSource,
+};
+use ccu::output::GlobalTableRenderer;
 use ccu::parsers::{CargoLockParser, CargoTomlParser, DependencyParser};
 use ccu::updater::FileUpdater;
 use check_updates_core::{DependencyCheck, DependencyResolver, TableRenderer, Version};
@@ -15,7 +20,152 @@ use check_updates_core::{DependencyCheck, DependencyResolver, TableRenderer, Ver
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    run_project_mode(&args).await
+
+    if args.global {
+        run_global_mode(&args).await
+    } else {
+        run_project_mode(&args).await
+    }
+}
+
+async fn run_global_mode(args: &Args) -> Result<()> {
+    if args.update {
+        println!(
+            "Note: --update flag is ignored in global mode. Commands will be shown instead.\n"
+        );
+    }
+
+    // 1. Discover installed crates from ~/.cargo/.crates.toml
+    let discovery = GlobalPackageDiscovery::new();
+    let packages = discovery.discover()?;
+
+    if packages.is_empty() {
+        println!("No globally installed cargo crates found.");
+        return Ok(());
+    }
+
+    let registry_names: Vec<String> = packages
+        .iter()
+        .filter(|p| p.source == GlobalSource::Registry)
+        .map(|p| p.name.clone())
+        .collect();
+    let git_count = packages.iter().filter(|p| p.source == GlobalSource::Git).count();
+
+    // 2. Check path repos (local git fetch), query crates.io, and check git repos concurrently
+    let path_statuses = check_path_updates(&packages);
+
+    let cratesio_client = CratesIoClient::new(args.pre_release);
+
+    let progress_bar = ProgressBar::new((registry_names.len() + git_count) as u64);
+    progress_bar.set_style(
+        ProgressStyle::default_bar()
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+            )
+            .expect("valid progress template")
+            .progress_chars("#>-"),
+    );
+
+    let progress_bar_clone = Arc::new(Mutex::new(progress_bar.clone()));
+    let pb_for_registry = Arc::clone(&progress_bar_clone);
+
+    let (cratesio_result, git_statuses) = tokio::join!(
+        cratesio_client.get_packages(&registry_names, move |current, _total| {
+            let pb = pb_for_registry.lock().expect("lock poisoned");
+            pb.set_position(current as u64);
+        }),
+        async {
+            let result = check_git_updates(&packages).await;
+            let pb = progress_bar_clone.lock().expect("lock poisoned");
+            pb.set_position(pb.length().unwrap_or(0));
+            result
+        }
+    );
+
+    progress_bar.finish_and_clear();
+
+    let cratesio_result = cratesio_result?;
+    let package_infos = cratesio_result.packages;
+
+    // 3. Build checks
+    let mut checks: Vec<GlobalCheck> = Vec::new();
+
+    for pkg in &packages {
+        match pkg.source {
+            GlobalSource::Registry => {
+                if let Some(info) = package_infos.get(&pkg.name) {
+                    let has_update = info.latest > pkg.installed_version;
+                    checks.push(GlobalCheck {
+                        package: pkg.clone(),
+                        latest_version: Some(info.latest.clone()),
+                        latest_hash: None,
+                        commits_behind: None,
+                        has_dirty_changes: false,
+                        has_update,
+                    });
+                }
+            }
+            GlobalSource::Git => {
+                if let Some(status) = git_statuses.get(&pkg.name) {
+                    let has_update = status.commits_behind > 0;
+                    checks.push(GlobalCheck {
+                        package: pkg.clone(),
+                        latest_version: None,
+                        latest_hash: Some(status.latest_hash.clone()),
+                        commits_behind: Some(status.commits_behind),
+                        has_dirty_changes: false,
+                        has_update,
+                    });
+                } else {
+                    checks.push(GlobalCheck {
+                        package: pkg.clone(),
+                        latest_version: None,
+                        latest_hash: None,
+                        commits_behind: None,
+                        has_dirty_changes: false,
+                        has_update: false,
+                    });
+                }
+            }
+            GlobalSource::Path => {
+                if let Some(status) = path_statuses.get(&pkg.name) {
+                    let has_update = status.commits_behind > 0;
+                    checks.push(GlobalCheck {
+                        package: pkg.clone(),
+                        latest_version: None,
+                        latest_hash: None,
+                        commits_behind: Some(status.commits_behind),
+                        has_dirty_changes: status.has_dirty_changes,
+                        has_update,
+                    });
+                } else {
+                    checks.push(GlobalCheck {
+                        package: pkg.clone(),
+                        latest_version: None,
+                        latest_hash: None,
+                        commits_behind: None,
+                        has_dirty_changes: false,
+                        has_update: false,
+                    });
+                }
+            }
+        }
+    }
+
+    // 4. Render results
+    let renderer = GlobalTableRenderer::new(true);
+    renderer.render(&checks);
+
+    // 5. Generate upgrade commands
+    let commands = generate_upgrade_commands(&checks);
+    if !commands.is_empty() {
+        println!("\nTo upgrade, run:\n");
+        for cmd in &commands {
+            println!("  $ {cmd}");
+        }
+    }
+
+    Ok(())
 }
 
 async fn run_project_mode(args: &Args) -> Result<()> {

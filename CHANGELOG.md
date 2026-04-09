@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `ccu -g` flag to check globally installed cargo binaries for updates
+  - **crates.io** packages: checks for newer versions on crates.io
+  - **git** installs (e.g. `cargo install --git`): queries GitHub API to show how many commits behind
+  - **local path** installs: detects dirty working trees and commits behind upstream via `git fetch`
+
 ### Fixed
 - `pcu -g` no longer suggests Python versions that uv hasn't built yet (e.g. recommending `uv python install 3.14.4` when uv only has 3.14.3). Both the header and uv-managed Python sections now use `uv python list` as the source of truth instead of endoflife.date API.
 

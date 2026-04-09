@@ -36,12 +36,20 @@ cargo install --path ccu       # Install ccu locally
 
 ## Architecture (ccu)
 
+**Project mode** (`ccu [PATH]`):
 1. `detector.rs` - Finds `Cargo.toml` files (root + workspace members via glob expansion)
 2. `parsers/cargo_toml.rs` - Extracts dependencies with version specs from `Cargo.toml`
 3. `parsers/cargo_lock.rs` - Reads installed versions from `Cargo.lock`
-4. `cratesio.rs` - Queries crates.io sparse index for latest versions
+4. `cratesio.rs` - Queries crates.io API for latest versions
 5. `updater.rs` - Applies version updates back to `Cargo.toml` (preserves formatting via `toml_edit`)
 6. `main.rs` - Orchestrates: detect -> parse -> query -> resolve -> display -> update
+
+**Global mode** (`ccu -g`):
+1. `global.rs` - Parses `~/.cargo/.crates.toml` to discover installed binaries (registry, git, path sources)
+2. For registry crates: queries crates.io for latest versions via `cratesio.rs`
+3. For git installs: queries GitHub compare API to check commits behind
+4. For path installs: runs `git fetch` + `git rev-list` to check upstream, flags dirty working trees
+5. `output.rs` - Renders results grouped by source type, generates upgrade commands
 
 ## Resolution Semantics (ccu)
 
@@ -49,4 +57,4 @@ ccu compares the **installed version** (from `Cargo.lock`) against the **latest 
 
 ## Testing
 
-17 tests across parser, detector, updater, and crates.io modules. Detector tests use `TempDir` to create temporary workspace layouts.
+25 tests across parser, detector, updater, crates.io, and global modules. Detector tests use `TempDir` to create temporary workspace layouts.
