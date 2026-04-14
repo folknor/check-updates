@@ -12,17 +12,17 @@ impl TableRenderer {
     }
 
     /// Render all packages with updates
-    pub fn render(&self, checks: &[DependencyCheck]) {
+    pub fn render(&self, checks: &[DependencyCheck], header: &str) {
         let checks_with_updates: Vec<&DependencyCheck> = checks
             .iter()
             .filter(|check| check.has_update())
             .collect();
 
-        self.render_deduped(&checks_with_updates);
+        self.render_deduped(&checks_with_updates, header);
     }
 
     /// Render a deduplicated list of checks
-    pub fn render_deduped(&self, checks: &[&DependencyCheck]) {
+    pub fn render_deduped(&self, checks: &[&DependencyCheck], header: &str) {
         if checks.is_empty() {
             println!("All dependencies are up to date!");
             return;
@@ -49,7 +49,7 @@ impl TableRenderer {
             .max()
             .unwrap_or(0);
 
-        println!("Outdated dependencies:\n");
+        println!("{header}\n");
 
         for check in checks {
             self.print_row(check, max_name, max_from, max_to);

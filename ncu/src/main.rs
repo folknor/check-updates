@@ -227,7 +227,12 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     // Render output
     let renderer = TableRenderer::new(true);
-    renderer.render(&checks);
+    let header = if args.update {
+        "Dependencies updated:"
+    } else {
+        "Outdated dependencies:"
+    };
+    renderer.render(&checks, header);
 
     // Apply updates if requested
     if args.update {

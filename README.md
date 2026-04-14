@@ -21,7 +21,12 @@ pcu -g              # Check global packages (uv tools, pipx, pip --user)
 ccu [PATH]          # Check Cargo project
 ccu -g              # Check global cargo binaries (crates.io, git, local path)
 ncu [PATH]          # Check npm/pnpm/yarn/bun project
+ncu -g              # Check global npm packages (npm only)
 ```
+
+If `PATH` is omitted, the current directory is scanned.
+
+`ncu` (project mode) supports npm, pnpm, yarn, and bun. `ncu -g` only checks packages installed via `npm -g` — pnpm/yarn/bun globals are not yet supported.
 
 ## Options
 
@@ -31,7 +36,7 @@ ncu [PATH]          # Check npm/pnpm/yarn/bun project
 | `-m` | Include minor updates (use with -u) |
 | `-f` | Force update to absolute latest |
 | `-p` | Include pre-release versions |
-| `-g` | Global mode (pcu, ccu) |
+| `-g` | Global mode |
 
 Combine flags: `-um` for patch+minor, `-uf` for everything.
 

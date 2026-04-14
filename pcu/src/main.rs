@@ -321,7 +321,12 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     // 6. Display results table
     let renderer = TableRenderer::new(true);
-    renderer.render_deduped(&deduplicated);
+    let header = if args.update {
+        "Dependencies updated:"
+    } else {
+        "Outdated dependencies:"
+    };
+    renderer.render_deduped(&deduplicated, header);
 
     // 7. If --update, apply updates based on severity filter
     if args.update {

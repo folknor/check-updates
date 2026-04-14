@@ -320,9 +320,15 @@ pub struct UpdateResult {
 impl UpdateResult {
     /// Print post-update messages
     pub fn print_summary(&self) {
+        if self.multi_file_packages.is_empty() && self.package_managers.is_empty() {
+            return;
+        }
+
+        println!();
+
         if !self.multi_file_packages.is_empty() {
             println!(
-                "\nNote: The following packages were updated in multiple files: {}",
+                "Note: The following packages were updated in multiple files: {}",
                 self.multi_file_packages.join(", ")
             );
         }

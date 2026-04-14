@@ -185,6 +185,7 @@ impl UpdateResult {
     /// Print post-update messages
     pub fn print_summary(&self) {
         if !self.modified_files.is_empty() {
+            println!();
             println!("Run `cargo update` to update Cargo.lock");
         }
     }

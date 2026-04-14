@@ -113,6 +113,7 @@ pub struct UpdateResult {
 impl UpdateResult {
     pub fn print_summary(&self) {
         if !self.modified_files.is_empty() {
+            println!();
             println!("Run `npm install` to install updated packages");
         }
     }
