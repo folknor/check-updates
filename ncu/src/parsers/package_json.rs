@@ -112,6 +112,7 @@ impl Default for PackageJsonParser {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -135,7 +136,7 @@ mod tests {
         )?;
 
         let parser = PackageJsonParser::new();
-        let deps = parser.parse(&file.path().to_path_buf())?;
+        let deps = parser.parse(file.path())?;
 
         assert_eq!(deps.len(), 3);
 
@@ -160,7 +161,7 @@ mod tests {
         )?;
 
         let parser = PackageJsonParser::new();
-        let deps = parser.parse(&file.path().to_path_buf())?;
+        let deps = parser.parse(file.path())?;
 
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].name, "express");

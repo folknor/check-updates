@@ -210,6 +210,7 @@ pub fn generate_uv_python_upgrade_commands(checks: &[UvPythonCheck]) -> Vec<Upgr
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

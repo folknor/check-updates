@@ -26,7 +26,7 @@ ncu -g              # Check global npm packages (npm only)
 
 If `PATH` is omitted, the current directory is scanned.
 
-`ncu` (project mode) supports npm, pnpm, yarn, and bun. `ncu -g` only checks packages installed via `npm -g` — pnpm/yarn/bun globals are not yet supported.
+`ncu` (project mode) supports npm, pnpm, yarn, and bun. `ncu -g` only checks packages installed via `npm -g` - pnpm/yarn/bun globals are not yet supported.
 
 ## Options
 

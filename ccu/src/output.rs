@@ -152,18 +152,18 @@ impl GlobalTableRenderer {
         for check in sorted {
             let mut status_parts: Vec<String> = Vec::new();
 
-            if let Some(n) = check.commits_behind {
-                if n > 0 {
-                    let behind_str = if n == 1 {
-                        "1 commit behind".to_string()
-                    } else {
-                        format!("{n} commits behind")
-                    };
-                    if self.show_colors {
-                        status_parts.push(behind_str.yellow().to_string());
-                    } else {
-                        status_parts.push(behind_str);
-                    }
+            if let Some(n) = check.commits_behind
+                && n > 0
+            {
+                let behind_str = if n == 1 {
+                    "1 commit behind".to_string()
+                } else {
+                    format!("{n} commits behind")
+                };
+                if self.show_colors {
+                    status_parts.push(behind_str.yellow().to_string());
+                } else {
+                    status_parts.push(behind_str);
                 }
             }
 

@@ -458,6 +458,7 @@ pub fn generate_upgrade_commands(checks: &[GlobalCheck]) -> Vec<UpgradeCommand> 
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

@@ -120,6 +120,7 @@ impl UpdateResult {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use check_updates_core::{Dependency, Version, VersionSpec};
@@ -141,15 +142,15 @@ mod tests {
                 version_spec: VersionSpec::parse(spec_str).unwrap(),
                 source_file: path,
                 line_number: 2,
-                original_line: format!("\"{}\": \"{}\"", name, spec_str),
+                original_line: format!("\"{name}\": \"{spec_str}\""),
             },
             installed: Some(Version::from_str(spec_str.trim_start_matches('^').trim_start_matches('~')).unwrap()),
             in_range: Some(target.clone()),
             latest: target.clone(),
             target: Some(target.clone()),
-            target_spec: Some(VersionSpec::parse(&format!("^{}", target_version)).unwrap()),
+            target_spec: Some(VersionSpec::parse(&format!("^{target_version}")).unwrap()),
             severity: Some(severity),
-            force_spec: Some(VersionSpec::parse(&format!("^{}", target_version)).unwrap()),
+            force_spec: Some(VersionSpec::parse(&format!("^{target_version}")).unwrap()),
         }
     }
 
@@ -178,7 +179,7 @@ mod tests {
         updater.apply_updates(&checks, false, false)?;
 
         let content = fs::read_to_string(&temp_path)?;
-        assert!(content.contains("4.18.2"), "express should be updated: {}", content);
+        assert!(content.contains("4.18.2"), "express should be updated: {content}");
         assert!(!content.contains("4.18.0") || content.contains("^4.18.0"), "lodash should NOT be updated");
 
         Ok(())

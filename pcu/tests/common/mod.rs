@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, dead_code)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;

@@ -202,6 +202,7 @@ impl DependencyParser for CondaParser {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -282,7 +283,7 @@ dependencies:
 "#;
 
         let mut temp_file = NamedTempFile::new().unwrap();
-        write!(temp_file, "{}", yaml_content).unwrap();
+        write!(temp_file, "{yaml_content}").unwrap();
         let path = temp_file.path().to_path_buf();
 
         let parser = CondaParser::new();
@@ -323,7 +324,7 @@ dependencies:
 "#;
 
         let mut temp_file = NamedTempFile::new().unwrap();
-        write!(temp_file, "{}", yaml_content).unwrap();
+        write!(temp_file, "{yaml_content}").unwrap();
 
         // Rename to .yaml extension
         let temp_path = temp_file.path().to_path_buf();
@@ -349,7 +350,7 @@ dependencies: []
 "#;
 
         let mut temp_file = NamedTempFile::new().unwrap();
-        write!(temp_file, "{}", yaml_content).unwrap();
+        write!(temp_file, "{yaml_content}").unwrap();
         let path = temp_file.path().to_path_buf();
 
         let parser = CondaParser::new();

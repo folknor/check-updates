@@ -347,6 +347,7 @@ impl UpdateResult {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -580,8 +581,8 @@ mod tests {
         updater.apply_updates(&checks, false, false)?; // patch only
 
         let content = fs::read_to_string(&temp_path)?;
-        assert!(content.contains("==1.0.200"), "serde should be updated: {}", content);
-        assert!(!content.contains("==1.5.0"), "tokio should NOT be updated: {}", content);
+        assert!(content.contains("==1.0.200"), "serde should be updated: {content}");
+        assert!(!content.contains("==1.5.0"), "tokio should NOT be updated: {content}");
 
         Ok(())
     }
@@ -637,8 +638,8 @@ mod tests {
         updater.apply_updates(&checks, true, false)?; // patch + minor
 
         let content = fs::read_to_string(&temp_path)?;
-        assert!(content.contains("==1.0.200"), "serde should be updated: {}", content);
-        assert!(content.contains("==1.5.0"), "tokio should be updated: {}", content);
+        assert!(content.contains("==1.0.200"), "serde should be updated: {content}");
+        assert!(content.contains("==1.5.0"), "tokio should be updated: {content}");
 
         Ok(())
     }

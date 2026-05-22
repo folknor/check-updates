@@ -172,6 +172,7 @@ impl Default for DependencyResolver {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
@@ -183,11 +184,11 @@ mod tests {
             version_spec: VersionSpec::parse(spec_str).unwrap(),
             source_file: PathBuf::from("test.txt"),
             line_number: 1,
-            original_line: format!("{}=={}", name, spec_str),
+            original_line: format!("{name}=={spec_str}"),
         }
     }
 
-    fn create_package_info(name: &str, versions: Vec<&str>) -> PackageInfo {
+    fn create_package_info(name: &str, versions: &[&str]) -> PackageInfo {
         let version_objects: Vec<Version> = versions
             .iter()
             .map(|v| Version::from_str(v).unwrap())
@@ -206,7 +207,7 @@ mod tests {
     fn test_in_range_update() {
         let resolver = DependencyResolver::new();
         let dep = create_test_dependency("requests", ">=2.28.0,<3.0.0");
-        let pkg_info = create_package_info("requests", vec!["2.28.0", "2.32.3", "3.1.0"]);
+        let pkg_info = create_package_info("requests", &["2.28.0", "2.32.3", "3.1.0"]);
 
         let installed = Version::from_str("2.28.0").unwrap();
         let result = resolver.resolve(&dep, &pkg_info, Some(&installed));
@@ -224,7 +225,7 @@ mod tests {
     fn test_force_only_update() {
         let resolver = DependencyResolver::new();
         let dep = create_test_dependency("flask", "^2.0.0");
-        let pkg_info = create_package_info("flask", vec!["2.0.0", "2.3.3", "3.0.0"]);
+        let pkg_info = create_package_info("flask", &["2.0.0", "2.3.3", "3.0.0"]);
 
         // Installed at latest in-range (2.3.3)
         let installed = Version::from_str("2.3.3").unwrap();
@@ -243,7 +244,7 @@ mod tests {
     fn test_no_update_needed() {
         let resolver = DependencyResolver::new();
         let dep = create_test_dependency("flask", ">=2.3.3");
-        let pkg_info = create_package_info("flask", vec!["2.0.0", "2.3.3"]);
+        let pkg_info = create_package_info("flask", &["2.0.0", "2.3.3"]);
 
         let installed = Version::from_str("2.3.3").unwrap();
         let result = resolver.resolve(&dep, &pkg_info, Some(&installed));

@@ -84,10 +84,10 @@ pub fn fetch_latest_python_version(current: &Version) -> Option<Version> {
         let version_str = name_parts[1];
         if let Ok(version) = Version::from_str(version_str) {
             let series = format!("{}.{}", version.major, version.minor);
-            if series == current_series {
-                if best.as_ref().is_none_or(|b| version > *b) {
-                    best = Some(version);
-                }
+            if series == current_series
+                && best.as_ref().is_none_or(|b| version > *b)
+            {
+                best = Some(version);
             }
         }
     }
@@ -149,6 +149,7 @@ pub fn get_python_info(check_latest: bool) -> Option<PythonInfo> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

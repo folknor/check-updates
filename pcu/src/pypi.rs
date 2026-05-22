@@ -243,6 +243,7 @@ impl Clone for PyPiClient {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -312,10 +313,7 @@ mod tests {
         let result_stable = client_stable.get_package("django").await;
         let result_pre = client_pre.get_package("django").await;
 
-        if result_stable.is_ok() && result_pre.is_ok() {
-            let stable = result_stable.unwrap();
-            let pre = result_pre.unwrap();
-
+        if let (Ok(stable), Ok(pre)) = (result_stable, result_pre) {
             // Pre-release client might have more versions
             assert!(pre.versions.len() >= stable.versions.len());
         }

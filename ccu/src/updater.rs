@@ -192,6 +192,7 @@ impl UpdateResult {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use check_updates_core::{Dependency, Version, VersionSpec};
@@ -213,7 +214,7 @@ mod tests {
                 version_spec: VersionSpec::parse(spec_str).unwrap(),
                 source_file: path,
                 line_number: 2,
-                original_line: format!("{} = \"{}\"", name, spec_str),
+                original_line: format!("{name} = \"{spec_str}\""),
             },
             installed: Some(Version::from_str(spec_str).unwrap()),
             in_range: Some(target.clone()),
@@ -248,8 +249,8 @@ tokio = "1.0.0"
         updater.apply_updates(&checks, false, false)?; // patch only
 
         let content = fs::read_to_string(&temp_path)?;
-        assert!(content.contains("1.0.200"), "serde should be updated: {}", content);
-        assert!(!content.contains("1.5.0"), "tokio should NOT be updated: {}", content);
+        assert!(content.contains("1.0.200"), "serde should be updated: {content}");
+        assert!(!content.contains("1.5.0"), "tokio should NOT be updated: {content}");
 
         Ok(())
     }
@@ -277,8 +278,8 @@ tokio = "1.0.0"
         updater.apply_updates(&checks, true, false)?; // patch + minor
 
         let content = fs::read_to_string(&temp_path)?;
-        assert!(content.contains("1.0.200"), "serde should be updated: {}", content);
-        assert!(content.contains("1.5.0"), "tokio should be updated: {}", content);
+        assert!(content.contains("1.0.200"), "serde should be updated: {content}");
+        assert!(content.contains("1.5.0"), "tokio should be updated: {content}");
 
         Ok(())
     }

@@ -2,7 +2,7 @@
 
 ## PEP 440 compatible release (~=)
 
-- **4-segment `~=` is not fully supported.** The `Version` struct only stores major.minor.patch, so `~=1.4.5.0` is treated as `~=1.4.5` (same major+minor) when PEP 440 says it should be capped at `1.4.5.*`. This would require adding a 4th version segment to `Version`. Unlikely to matter in practice — 4-segment compatible releases are rare.
+- **4-segment `~=` is not fully supported.** The `Version` struct only stores major.minor.patch, so `~=1.4.5.0` is treated as `~=1.4.5` (same major+minor) when PEP 440 says it should be capped at `1.4.5.*`. This would require adding a 4th version segment to `Version`. Unlikely to matter in practice - 4-segment compatible releases are rare.
 
 ## Version ordering
 

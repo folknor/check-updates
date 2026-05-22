@@ -63,6 +63,7 @@ impl Default for CargoLockParser {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -91,7 +92,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         )?;
 
         let parser = CargoLockParser::new();
-        let versions = parser.parse(&file.path().to_path_buf())?;
+        let versions = parser.parse(file.path())?;
 
         assert_eq!(versions.len(), 2);
         assert_eq!(versions.get("serde").unwrap()[0].to_string(), "1.0.200");
@@ -119,12 +120,12 @@ version = "2.0.60"
         )?;
 
         let parser = CargoLockParser::new();
-        let versions = parser.parse(&file.path().to_path_buf())?;
+        let versions = parser.parse(file.path())?;
 
         // Should have both versions
         let syn_versions = versions.get("syn").expect("syn should be present");
         assert_eq!(syn_versions.len(), 2);
-        let syn_strs: Vec<String> = syn_versions.iter().map(|v| v.to_string()).collect();
+        let syn_strs: Vec<String> = syn_versions.iter().map(ToString::to_string).collect();
         assert!(syn_strs.contains(&"1.0.109".to_string()));
         assert!(syn_strs.contains(&"2.0.60".to_string()));
 

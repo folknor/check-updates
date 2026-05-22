@@ -42,7 +42,7 @@ impl GlobalTableRenderer {
             self.render_group_or_uptodate("npm global:", npm_checks);
         }
 
-        // Suppress unused variable warning — first_group will be used when more sources are added
+        // Suppress unused variable warning - first_group will be used when more sources are added
         let _ = first_group;
     }
 

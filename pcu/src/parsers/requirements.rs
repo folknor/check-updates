@@ -159,6 +159,7 @@ impl DependencyParser for RequirementsParser {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -173,7 +174,7 @@ mod tests {
         writeln!(file, "flask").unwrap();
 
         let parser = RequirementsParser::new();
-        let deps = parser.parse(&file.path().to_path_buf()).unwrap();
+        let deps = parser.parse(file.path()).unwrap();
 
         assert_eq!(deps.len(), 3);
         assert_eq!(deps[0].name, "requests");
@@ -191,7 +192,7 @@ mod tests {
         writeln!(file, "celery[redis,msgpack]==5.2.0").unwrap();
 
         let parser = RequirementsParser::new();
-        let deps = parser.parse(&file.path().to_path_buf()).unwrap();
+        let deps = parser.parse(file.path()).unwrap();
 
         assert_eq!(deps.len(), 2);
         assert_eq!(deps[0].name, "requests");
@@ -203,11 +204,11 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "# This is a comment").unwrap();
         writeln!(file, "requests==2.28.0  # inline comment").unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(file).unwrap();
         writeln!(file, "numpy>=1.24.0").unwrap();
 
         let parser = RequirementsParser::new();
-        let deps = parser.parse(&file.path().to_path_buf()).unwrap();
+        let deps = parser.parse(file.path()).unwrap();
 
         assert_eq!(deps.len(), 2);
         assert_eq!(deps[0].name, "requests");
@@ -221,7 +222,7 @@ mod tests {
         writeln!(file, "typing-extensions>=3.7; python_version >= '3.8'").unwrap();
 
         let parser = RequirementsParser::new();
-        let deps = parser.parse(&file.path().to_path_buf()).unwrap();
+        let deps = parser.parse(file.path()).unwrap();
 
         assert_eq!(deps.len(), 2);
         assert_eq!(deps[0].name, "dataclasses");
@@ -236,7 +237,7 @@ mod tests {
         writeln!(file, "requests==2.28.0").unwrap();
 
         let parser = RequirementsParser::new();
-        let deps = parser.parse(&file.path().to_path_buf()).unwrap();
+        let deps = parser.parse(file.path()).unwrap();
 
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].name, "requests");
@@ -250,7 +251,7 @@ mod tests {
         writeln!(file, "click!=8.0.0").unwrap();
 
         let parser = RequirementsParser::new();
-        let deps = parser.parse(&file.path().to_path_buf()).unwrap();
+        let deps = parser.parse(file.path()).unwrap();
 
         assert_eq!(deps.len(), 3);
         assert_eq!(deps[0].name, "django");
@@ -264,11 +265,11 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "# Comment line").unwrap();
         writeln!(file, "requests==2.28.0").unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(file).unwrap();
         writeln!(file, "numpy>=1.24.0").unwrap();
 
         let parser = RequirementsParser::new();
-        let deps = parser.parse(&file.path().to_path_buf()).unwrap();
+        let deps = parser.parse(file.path()).unwrap();
 
         assert_eq!(deps.len(), 2);
         assert_eq!(deps[0].line_number, 2);

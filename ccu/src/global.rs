@@ -78,6 +78,7 @@ impl GlobalCheck {
 }
 
 /// Discovers globally installed cargo crates from ~/.cargo/.crates.toml
+#[derive(Default)]
 pub struct GlobalPackageDiscovery {}
 
 impl GlobalPackageDiscovery {
@@ -162,9 +163,8 @@ impl GlobalPackageDiscovery {
                 git_hash: None,
                 local_path: None,
             })
-        } else if source_str.starts_with("git+") {
+        } else if let Some(git_part) = source_str.strip_prefix("git+") {
             // Parse: "git+https://github.com/user/repo#commithash"
-            let git_part = &source_str[4..]; // strip "git+"
             let (url, hash) = if let Some(hash_idx) = git_part.find('#') {
                 (
                     git_part[..hash_idx].to_string(),
@@ -183,11 +183,11 @@ impl GlobalPackageDiscovery {
                 git_hash: hash,
                 local_path: None,
             })
-        } else if source_str.starts_with("path+") {
-            // Parse: "path+file:///home/user/project"
-            let path_str = source_str
-                .strip_prefix("path+file://")
-                .unwrap_or(&source_str[5..]);
+        } else if let Some(path_str) = source_str
+            .strip_prefix("path+file://")
+            .or_else(|| source_str.strip_prefix("path+"))
+        {
+            // Parse: "path+file:///home/user/project" or "path+/home/user/project"
             let path = PathBuf::from(path_str);
 
             // Only include if the path still exists and is a git repo
@@ -231,10 +231,10 @@ pub async fn check_git_updates(packages: &[GlobalPackage]) -> HashMap<String, Gi
             continue;
         };
 
-        if let Some((owner, repo)) = parse_github_url(url) {
-            if let Some(status) = check_github_repo(&client, &owner, &repo, installed_hash).await {
-                results.insert(pkg.name.clone(), status);
-            }
+        if let Some((owner, repo)) = parse_github_url(url)
+            && let Some(status) = check_github_repo(&client, &owner, &repo, installed_hash).await
+        {
+            results.insert(pkg.name.clone(), status);
         }
     }
 
@@ -442,6 +442,7 @@ pub fn generate_upgrade_commands(checks: &[GlobalCheck]) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

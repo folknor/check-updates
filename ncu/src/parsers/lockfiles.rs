@@ -119,15 +119,12 @@ impl LockfileParser {
         // Handle scoped packages: @scope/name@version
         let (name, version_str) = if let Some(rest) = key.strip_prefix('@') {
             // Find the second @ which separates name from version
-            if let Some(at_pos) = rest.find('@') {
-                let name = &key[..at_pos + 1];
-                let version_part = &rest[at_pos + 1..];
-                // Remove any peer dep suffix like (supports-color@8.0.0)
-                let version_str = version_part.split('(').next().unwrap_or(version_part);
-                (name.to_string(), version_str)
-            } else {
-                return None;
-            }
+            let at_pos = rest.find('@')?;
+            let name = &key[..at_pos + 1];
+            let version_part = &rest[at_pos + 1..];
+            // Remove any peer dep suffix like (supports-color@8.0.0)
+            let version_str = version_part.split('(').next().unwrap_or(version_part);
+            (name.to_string(), version_str)
         } else {
             // Regular package: name@version
             let parts: Vec<&str> = key.splitn(2, '@').collect();
@@ -234,6 +231,7 @@ impl Default for LockfileParser {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::io::Write;

@@ -252,6 +252,7 @@ impl DependencyParser for CargoTomlParser {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::fs;
@@ -275,7 +276,7 @@ tokio = {{ version = "1.0", features = ["full"] }}
         )?;
 
         let parser = CargoTomlParser::new();
-        let deps = parser.parse(&file.path().to_path_buf())?;
+        let deps = parser.parse(file.path())?;
 
         assert_eq!(deps.len(), 2);
 
@@ -302,7 +303,7 @@ local-crate = {{ path = "../local" }}
         )?;
 
         let parser = CargoTomlParser::new();
-        let deps = parser.parse(&file.path().to_path_buf())?;
+        let deps = parser.parse(file.path())?;
 
         // Should only have serde, not git/path deps
         assert_eq!(deps.len(), 1);
@@ -329,7 +330,7 @@ cc = "1.0"
         )?;
 
         let parser = CargoTomlParser::new();
-        let deps = parser.parse(&file.path().to_path_buf())?;
+        let deps = parser.parse(file.path())?;
 
         assert_eq!(deps.len(), 3);
         assert!(deps.iter().any(|d| d.name == "serde"));
@@ -414,7 +415,7 @@ direct = "1.0"
         )?;
 
         let parser = CargoTomlParser::new();
-        let deps = parser.parse(&file.path().to_path_buf())?;
+        let deps = parser.parse(file.path())?;
 
         // Only direct dep should be found
         assert_eq!(deps.len(), 1);

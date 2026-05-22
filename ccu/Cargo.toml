@@ -34,7 +34,7 @@ anyhow.workspace = true
 thiserror.workspace = true
 
 # Cargo-specific
-toml_edit = "0.25.10"
+toml_edit = "0.25.11"
 glob = "0.3"
 
 [dev-dependencies]

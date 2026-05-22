@@ -483,6 +483,7 @@ impl fmt::Display for VersionSpec {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
