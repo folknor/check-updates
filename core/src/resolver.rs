@@ -185,6 +185,7 @@ mod tests {
             source_file: PathBuf::from("test.txt"),
             line_number: 1,
             original_line: format!("{name}=={spec_str}"),
+            manifest_key: None,
         }
     }
 

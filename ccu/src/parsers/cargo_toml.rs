@@ -57,10 +57,17 @@ impl CargoTomlParser {
     ) -> Vec<Dependency> {
         let mut deps = Vec::new();
 
-        for (name, value) in table {
+        for (key, value) in table {
             let is_workspace_ref = Self::is_workspace_reference(value);
+            // Resolve a `package = "..."` rename if present.
+            // `name` is the upstream crate name we'll query on crates.io;
+            // `key` stays as the local table key for the updater to find.
+            let (name, manifest_key) = match Self::extract_package_rename(value) {
+                Some(upstream) => (upstream, Some(key.clone())),
+                None => (key.clone(), None),
+            };
 
-            if let Some(version_str) = self.extract_version_or_workspace(name, value) {
+            if let Some(version_str) = self.extract_version_or_workspace(key, value) {
                 // For workspace references resolved from root, point source_file
                 // to the root Cargo.toml where the version is actually defined
                 let effective_source = if is_workspace_ref {
@@ -75,13 +82,13 @@ impl CargoTomlParser {
                     && root_path != source_file
                 {
                     if let Ok(root_content) = fs::read_to_string(root_path) {
-                        let ln = self.find_line_number(&root_content, name, &version_str);
+                        let ln = self.find_line_number(&root_content, key, &version_str);
                         (Some(root_content), ln)
                     } else {
-                        (None, self.find_line_number(content, name, &version_str))
+                        (None, self.find_line_number(content, key, &version_str))
                     }
                 } else {
-                    (None, self.find_line_number(content, name, &version_str))
+                    (None, self.find_line_number(content, key, &version_str))
                 };
 
                 let line_content = effective_content.as_deref().unwrap_or(content);
@@ -93,17 +100,29 @@ impl CargoTomlParser {
 
                 if let Ok(version_spec) = Self::parse_cargo_version(&version_str) {
                     deps.push(Dependency {
-                        name: name.clone(),
+                        name,
                         version_spec,
                         source_file: effective_source.to_path_buf(),
                         line_number,
                         original_line,
+                        manifest_key,
                     });
                 }
             }
         }
 
         deps
+    }
+
+    /// If this dependency uses `package = "..."` to rename the upstream crate
+    /// (e.g. `tokio1_crate = { package = "tokio", version = "1" }`), return
+    /// the upstream name.
+    fn extract_package_rename(value: &Value) -> Option<String> {
+        if let Value::Table(table) = value {
+            table.get("package").and_then(Value::as_str).map(String::from)
+        } else {
+            None
+        }
     }
 
     /// Check if a dependency value is a workspace reference (`.workspace = true`)
@@ -420,6 +439,40 @@ direct = "1.0"
         // Only direct dep should be found
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].name, "direct");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_renamed_dep_with_package_key() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        writeln!(
+            file,
+            r#"
+[package]
+name = "test"
+version = "0.1.0"
+
+[dependencies]
+serde = "1.0"
+tokio1_crate = {{ package = "tokio", version = "1.0" }}
+"#
+        )?;
+
+        let parser = CargoTomlParser::new();
+        let deps = parser.parse(file.path())?;
+
+        assert_eq!(deps.len(), 2);
+
+        let serde_dep = deps.iter().find(|d| d.name == "serde").unwrap();
+        assert_eq!(serde_dep.name, "serde");
+        assert_eq!(serde_dep.manifest_key, None);
+
+        // Renamed: name is the upstream "tokio", manifest_key preserves the
+        // local "tokio1_crate" so the updater can find the table entry.
+        let tokio_dep = deps.iter().find(|d| d.name == "tokio").unwrap();
+        assert_eq!(tokio_dep.name, "tokio");
+        assert_eq!(tokio_dep.manifest_key.as_deref(), Some("tokio1_crate"));
 
         Ok(())
     }

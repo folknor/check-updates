@@ -78,6 +78,7 @@ impl PackageJsonParser {
                         source_file: source_file.to_path_buf(),
                         line_number,
                         original_line,
+                        manifest_key: None,
                     });
                 }
             }

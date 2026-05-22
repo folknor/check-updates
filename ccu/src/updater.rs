@@ -82,9 +82,15 @@ impl FileUpdater {
             .parse()
             .with_context(|| format!("Failed to parse TOML: {}", file_path.display()))?;
 
-        // Apply each update
+        // Apply each update. For renamed deps (`local = { package = "real", ... }`)
+        // the table key is the local alias, not the upstream name.
         for (check, new_version) in updates {
-            self.update_dependency(&mut doc, &check.dependency.name, new_version);
+            let lookup_key = check
+                .dependency
+                .manifest_key
+                .as_deref()
+                .unwrap_or(&check.dependency.name);
+            self.update_dependency(&mut doc, lookup_key, new_version);
         }
 
         // Write the updated content
@@ -215,6 +221,7 @@ mod tests {
                 source_file: path,
                 line_number: 2,
                 original_line: format!("{name} = \"{spec_str}\""),
+                manifest_key: None,
             },
             installed: Some(Version::from_str(spec_str).unwrap()),
             in_range: Some(target.clone()),

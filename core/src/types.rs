@@ -5,7 +5,8 @@ use std::path::PathBuf;
 /// A dependency as parsed from a file (generic across ecosystems)
 #[derive(Debug, Clone, Serialize)]
 pub struct Dependency {
-    /// Package name (normalized)
+    /// Upstream package name on the registry (crates.io / PyPI / npm).
+    /// For renamed/aliased deps this is the real package, not the local key.
     pub name: String,
     /// Version specification as parsed
     #[serde(rename = "spec")]
@@ -17,6 +18,11 @@ pub struct Dependency {
     /// Original line text (for updating)
     #[serde(skip_serializing)]
     pub original_line: String,
+    /// Local table key when it differs from `name` - i.e. a Cargo.toml
+    /// `local_alias = { package = "real-name", ... }` rename. `None` when
+    /// the manifest key already matches the upstream name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_key: Option<String>,
 }
 
 /// Package information from a registry (generic across ecosystems)

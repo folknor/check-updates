@@ -168,6 +168,7 @@ impl DependencyParser for CondaParser {
                             source_file: path.to_path_buf(),
                             line_number,
                             original_line: format!("  - {dep_str}"),
+                            manifest_key: None,
                         });
                     }
                 } else if let Some(pip_section) = dep.as_mapping() {
@@ -182,6 +183,7 @@ impl DependencyParser for CondaParser {
                                         source_file: path.to_path_buf(),
                                         line_number: line_number + pip_idx + 1, // Approximate line number
                                         original_line: format!("    - {pip_dep_str}"),
+                                        manifest_key: None,
                                     });
                                 }
                         }

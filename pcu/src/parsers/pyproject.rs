@@ -240,6 +240,7 @@ impl PyProjectParser {
             source_file: path.to_path_buf(),
             line_number,
             original_line,
+            manifest_key: None,
         })
     }
 
@@ -283,6 +284,7 @@ impl PyProjectParser {
                     source_file: path.to_path_buf(),
                     line_number,
                     original_line,
+                    manifest_key: None,
                 });
             }
         }
@@ -298,6 +300,7 @@ impl PyProjectParser {
                 source_file: path.to_path_buf(),
                 line_number,
                 original_line,
+                manifest_key: None,
             });
         }
 

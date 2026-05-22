@@ -143,6 +143,7 @@ mod tests {
                 source_file: path,
                 line_number: 2,
                 original_line: format!("\"{name}\": \"{spec_str}\""),
+                manifest_key: None,
             },
             installed: Some(Version::from_str(spec_str.trim_start_matches('^').trim_start_matches('~')).unwrap()),
             in_range: Some(target.clone()),
