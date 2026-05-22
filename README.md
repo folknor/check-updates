@@ -37,6 +37,7 @@ If `PATH` is omitted, the current directory is scanned.
 | `-f` | Force update to absolute latest |
 | `-p` | Include pre-release versions |
 | `-g` | Global mode |
+| `--json` | Emit machine-readable JSON on stdout (see each crate's README for the schema) |
 
 Combine flags: `-um` for patch+minor, `-uf` for everything.
 

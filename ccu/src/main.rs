@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
+use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -15,7 +16,49 @@ use ccu::global::{
 use ccu::output::GlobalTableRenderer;
 use ccu::parsers::{CargoLockParser, CargoTomlParser, DependencyParser};
 use ccu::updater::FileUpdater;
-use check_updates_core::{DependencyCheck, DependencyResolver, TableRenderer, Version};
+use check_updates_core::{DependencyCheck, DependencyResolver, TableRenderer, UpdateSeverity, Version};
+
+const SCHEMA_VERSION: u32 = 1;
+const TOOL_NAME: &str = "ccu";
+
+/// Wraps a GlobalCheck so JSON output includes the computed severity.
+#[derive(Serialize)]
+struct GlobalCheckJson<'a> {
+    #[serde(flatten)]
+    inner: &'a GlobalCheck,
+    severity: Option<UpdateSeverity>,
+}
+
+fn errors_to_json(errors: &[String]) -> Vec<serde_json::Value> {
+    errors.iter().map(|e| serde_json::json!({"message": e})).collect()
+}
+
+fn emit_json_project(checks: &[DependencyCheck], errors: &[String]) -> Result<()> {
+    let report = serde_json::json!({
+        "schema_version": SCHEMA_VERSION,
+        "tool": TOOL_NAME,
+        "mode": "project",
+        "checks": checks,
+        "errors": errors_to_json(errors),
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+fn emit_json_global(checks: &[GlobalCheck]) -> Result<()> {
+    let with_severity: Vec<GlobalCheckJson<'_>> = checks
+        .iter()
+        .map(|c| GlobalCheckJson { inner: c, severity: c.update_severity() })
+        .collect();
+    let report = serde_json::json!({
+        "schema_version": SCHEMA_VERSION,
+        "tool": TOOL_NAME,
+        "mode": "global",
+        "checks": with_severity,
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -29,7 +72,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_global_mode(args: &Args) -> Result<()> {
-    if args.update {
+    if args.update && !args.json {
         println!(
             "Note: --update flag is ignored in global mode. Commands will be shown instead.\n"
         );
@@ -40,7 +83,11 @@ async fn run_global_mode(args: &Args) -> Result<()> {
     let packages = discovery.discover()?;
 
     if packages.is_empty() {
-        println!("No globally installed cargo crates found.");
+        if args.json {
+            emit_json_global(&[])?;
+        } else {
+            println!("No globally installed cargo crates found.");
+        }
         return Ok(());
     }
 
@@ -153,6 +200,11 @@ async fn run_global_mode(args: &Args) -> Result<()> {
     }
 
     // 4. Render results
+    if args.json {
+        emit_json_global(&checks)?;
+        return Ok(());
+    }
+
     let renderer = GlobalTableRenderer::new(true);
     renderer.render(&checks);
 
@@ -185,7 +237,11 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     let detected_files = detector.detect()?;
 
     if detected_files.is_empty() {
-        println!("No Cargo.toml found in {project_path:?}");
+        if args.json {
+            emit_json_project(&[], &[])?;
+        } else {
+            println!("No Cargo.toml found in {project_path:?}");
+        }
         return Ok(());
     }
 
@@ -210,7 +266,11 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     }
 
     if all_dependencies.is_empty() {
-        println!("No dependencies found in Cargo.toml");
+        if args.json {
+            emit_json_project(&[], &[])?;
+        } else {
+            println!("No dependencies found in Cargo.toml");
+        }
         return Ok(());
     }
 
@@ -251,8 +311,8 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     let fetch_errors = cratesio_result.errors;
     progress_bar.finish_and_clear();
 
-    // Print fetch errors if any
-    if !fetch_errors.is_empty() {
+    // Print fetch errors if any (suppress in JSON mode; included in payload below)
+    if !fetch_errors.is_empty() && !args.json {
         println!("{}", "Crates not found on crates.io:".dimmed());
         for error in &fetch_errors {
             println!("  {}", error.dimmed());
@@ -302,6 +362,15 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         .collect();
 
     // 6. Display results
+    if args.json {
+        if args.update {
+            let updater = FileUpdater::new();
+            let _ = updater.apply_updates(&checks, args.minor, args.force)?;
+        }
+        emit_json_project(&checks, &fetch_errors)?;
+        return Ok(());
+    }
+
     let renderer = TableRenderer::new(true);
     let header = if args.update {
         "Dependencies updated:"

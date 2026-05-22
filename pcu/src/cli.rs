@@ -29,6 +29,10 @@ pub struct Args {
     /// Include pre-release versions
     #[arg(short, long)]
     pub pre_release: bool,
+
+    /// Emit results as JSON on stdout (status messages go to stderr)
+    #[arg(long)]
+    pub json: bool,
 }
 
 impl Args {

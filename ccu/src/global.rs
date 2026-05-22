@@ -1,11 +1,13 @@
 use check_updates_core::{UpdateSeverity, Version};
 use anyhow::Result;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 
 /// Source of a globally installed cargo crate
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum GlobalSource {
     /// Installed from crates.io (or another registry)
     Registry,
@@ -26,7 +28,7 @@ impl std::fmt::Display for GlobalSource {
 }
 
 /// A globally installed cargo crate
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GlobalPackage {
     pub name: String,
     pub installed_version: Version,
@@ -41,7 +43,7 @@ pub struct GlobalPackage {
 }
 
 /// Result of checking a global package for updates
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GlobalCheck {
     pub package: GlobalPackage,
     /// For registry crates: the latest version on crates.io

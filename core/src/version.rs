@@ -13,7 +13,7 @@ pub enum VersionError {
 }
 
 /// A parsed semantic version
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Version {
     pub major: u64,
     pub minor: u64,
@@ -23,6 +23,19 @@ pub struct Version {
     pub local: Option<String>,
     /// Original string representation
     pub original: String,
+}
+
+impl Serialize for Version {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Version {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Version::from_str(&s).map_err(serde::de::Error::custom)
+    }
 }
 
 impl PartialEq for Version {
@@ -479,6 +492,12 @@ impl fmt::Display for VersionSpec {
             VersionSpec::NotEqual(v) => write!(f, "!={v}"),
             VersionSpec::Complex(s) => write!(f, "{s}"),
         }
+    }
+}
+
+impl Serialize for VersionSpec {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
     }
 }
 

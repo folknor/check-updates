@@ -23,6 +23,7 @@ Run `pcu` in a Python project directory to see outdated dependencies.
 | `-m` | Include minor updates (use with `-u` as `-um`) |
 | `-f` | Force update all to absolute latest (use with `-u` as `-uf`) |
 | `-p` | Include pre-release versions |
+| `--json` | Emit machine-readable JSON on stdout (status messages go to stderr) |
 
 ### Example
 
@@ -35,6 +36,22 @@ Outdated dependencies:
 
 Run -u to upgrade patch, -um to upgrade patch+minors, and -uf to force upgrade all.
 ```
+
+### JSON output
+
+`--json` emits a versioned envelope. Versions and specs come through as strings.
+
+```
+$ pcu --json | jq '.checks[] | select(.severity != null) | {name: .dependency.name, installed, latest, severity}'
+{
+  "name": "requests",
+  "installed": "2.31.0",
+  "latest": "2.32.3",
+  "severity": "minor"
+}
+```
+
+Schema: `{ schema_version, tool, mode, checks[], errors[] }`. In `-g` mode the envelope also carries `python_versions[]` for uv-managed Python series.
 
 ## Supported files
 

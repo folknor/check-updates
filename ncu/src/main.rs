@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use check_updates_core::{DependencyResolver, Version};
+use check_updates_core::{DependencyCheck, DependencyResolver, Version};
 use clap::Parser;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -13,6 +13,40 @@ use ncu::output::{GlobalTableRenderer, TableRenderer};
 use ncu::parsers::{LockfileParser, PackageJsonParser};
 use ncu::updater::FileUpdater;
 
+const SCHEMA_VERSION: u32 = 1;
+const TOOL_NAME: &str = "ncu";
+
+fn errors_to_json(errors: &[(String, String)]) -> Vec<serde_json::Value> {
+    errors
+        .iter()
+        .map(|(name, message)| serde_json::json!({"name": name, "message": message}))
+        .collect()
+}
+
+fn emit_json_project(checks: &[DependencyCheck], errors: &[(String, String)]) -> Result<()> {
+    let report = serde_json::json!({
+        "schema_version": SCHEMA_VERSION,
+        "tool": TOOL_NAME,
+        "mode": "project",
+        "checks": checks,
+        "errors": errors_to_json(errors),
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+fn emit_json_global(checks: &[GlobalCheck], errors: &[(String, String)]) -> Result<()> {
+    let report = serde_json::json!({
+        "schema_version": SCHEMA_VERSION,
+        "tool": TOOL_NAME,
+        "mode": "global",
+        "checks": checks,
+        "errors": errors_to_json(errors),
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -25,7 +59,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_global_mode(args: &Args) -> Result<()> {
-    if args.update {
+    if args.update && !args.json {
         println!(
             "Note: --update flag is ignored in global mode. Commands will be shown instead.\n"
         );
@@ -36,7 +70,11 @@ async fn run_global_mode(args: &Args) -> Result<()> {
     let packages = discovery.discover();
 
     if packages.is_empty() {
-        println!("No globally installed npm packages found.");
+        if args.json {
+            emit_json_global(&[], &[])?;
+        } else {
+            println!("No globally installed npm packages found.");
+        }
         return Ok(());
     }
 
@@ -106,6 +144,11 @@ async fn run_global_mode(args: &Args) -> Result<()> {
     }
 
     // 4. Display results
+    if args.json {
+        emit_json_global(&checks, &errors)?;
+        return Ok(());
+    }
+
     let renderer = GlobalTableRenderer::new(true);
     renderer.render(&checks);
 
@@ -143,7 +186,11 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     let detected_files = detector.detect()?;
 
     if detected_files.is_empty() {
-        println!("No package.json files found in {project_path:?}");
+        if args.json {
+            emit_json_project(&[], &[])?;
+        } else {
+            println!("No package.json files found in {project_path:?}");
+        }
         return Ok(());
     }
 
@@ -170,7 +217,11 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     }
 
     if all_deps.is_empty() {
-        println!("No dependencies found");
+        if args.json {
+            emit_json_project(&[], &[])?;
+        } else {
+            println!("No dependencies found");
+        }
         return Ok(());
     }
 
@@ -223,6 +274,16 @@ async fn run_project_mode(args: &Args) -> Result<()> {
             let check = resolver.resolve(dep, info, installed);
             checks.push(check);
         }
+    }
+
+    if args.json {
+        // Apply updates as a side effect if requested, then emit JSON (no human text).
+        if args.update {
+            let updater = FileUpdater::new();
+            let _ = updater.apply_updates(&checks, args.minor, args.force)?;
+        }
+        emit_json_project(&checks, &errors)?;
+        return Ok(());
     }
 
     // Render output

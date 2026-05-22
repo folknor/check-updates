@@ -18,10 +18,12 @@ Run `ccu` in a Rust project directory to see outdated dependencies. Supports wor
 
 | Flag | Description |
 |------|-------------|
+| `-g` | Check globally installed cargo binaries (crates.io, git, local path) |
 | `-u` | Update `Cargo.toml` (patch updates only) |
 | `-m` | Include minor updates (use with `-u` as `-um`) |
 | `-f` | Force update all to absolute latest (use with `-u` as `-uf`) |
 | `-p` | Include pre-release versions |
+| `--json` | Emit machine-readable JSON on stdout (status messages go to stderr) |
 
 ### Example
 
@@ -34,6 +36,22 @@ Outdated dependencies:
 
 Run -u to upgrade patch, -um to upgrade patch+minors, and -uf to force upgrade all.
 ```
+
+### JSON output
+
+`--json` emits a versioned envelope. Versions and specs come through as strings.
+
+```
+$ ccu --json | jq '.checks[] | select(.severity != null) | {name: .dependency.name, installed, latest, severity}'
+{
+  "name": "tokio",
+  "installed": "1.50.0",
+  "latest": "1.51.0",
+  "severity": "minor"
+}
+```
+
+Schema: `{ schema_version, tool, mode, checks[], errors[] }`. In `-g` mode each check includes `source` (`registry` / `git` / `path`) and source-specific fields (`latest_version`, `git_url`, `git_hash`, `latest_hash`, `commits_behind`, `local_path`, `has_dirty_changes`).
 
 ## Supported files
 

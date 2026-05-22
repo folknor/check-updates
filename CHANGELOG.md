@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `--json` flag on `ccu`, `pcu`, and `ncu` for machine-readable output. Emits a versioned envelope on stdout (`schema_version`, `tool`, `mode`, `checks`, `errors`; `pcu -g` also includes `python_versions`). Status messages and the upgrade hint are suppressed; progress bars stay on stderr. Works alongside `-u` (file edits still happen). Versions and version specs serialize as their canonical string form (e.g. `"1.0.150"`, `"^0.22"`).
 - `ccu -g` flag to check globally installed cargo binaries for updates
   - **crates.io** packages: checks for newer versions on crates.io
   - **git** installs (e.g. `cargo install --git`): queries GitHub API to show how many commits behind

@@ -1,5 +1,6 @@
 use check_updates_core::{UpdateSeverity, Version};
 use anyhow::Result;
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -7,7 +8,8 @@ use std::process::Command;
 use std::str::FromStr;
 
 /// Source of a globally installed package
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GlobalSource {
     Uv,
     Pipx,
@@ -25,7 +27,7 @@ impl std::fmt::Display for GlobalSource {
 }
 
 /// A globally installed package
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GlobalPackage {
     pub name: String,
     pub installed_version: Version,
@@ -35,7 +37,7 @@ pub struct GlobalPackage {
 }
 
 /// Result of checking a global package
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GlobalCheck {
     pub package: GlobalPackage,
     pub latest: Version,

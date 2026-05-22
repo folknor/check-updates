@@ -23,6 +23,7 @@ Run `ncu` in a Node.js project directory to see outdated dependencies. Supports 
 | `-m` | Include minor updates (use with `-u` as `-um`) |
 | `-f` | Force update all to absolute latest (use with `-u` as `-uf`) |
 | `-p` | Include pre-release versions |
+| `--json` | Emit machine-readable JSON on stdout (status messages go to stderr) |
 
 ### Example
 
@@ -35,6 +36,22 @@ Outdated dependencies:
 
 Run -u to upgrade patch, -um to upgrade patch+minors, and -uf to force upgrade all.
 ```
+
+### JSON output
+
+`--json` emits a versioned envelope. Versions and specs come through as strings.
+
+```
+$ ncu --json | jq '.checks[] | select(.severity != null) | {name: .dependency.name, installed, latest, severity}'
+{
+  "name": "express",
+  "installed": "4.18.2",
+  "latest": "4.21.0",
+  "severity": "minor"
+}
+```
+
+Schema: `{ schema_version, tool, mode, checks[], errors[] }`.
 
 ## Supported files
 

@@ -226,3 +226,59 @@ fn test_default_to_current_directory() {
         .assert()
         .success();
 }
+
+/// `--json` on an empty project emits a valid JSON envelope.
+#[test]
+fn test_json_empty_project_envelope() {
+    let project = common::TempProject::new();
+
+    let output = Command::cargo_bin("pcu")
+        .unwrap()
+        .arg(project.path())
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "pcu --json should succeed on empty project");
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["tool"], "pcu");
+    assert_eq!(value["mode"], "project");
+    assert!(value["checks"].is_array(), "checks should be an array");
+    assert_eq!(value["checks"].as_array().unwrap().len(), 0);
+    assert!(value["errors"].is_array(), "errors should be an array");
+}
+
+/// `--json` on a real project emits envelope with parseable checks.
+/// Hits PyPI, so we only assert on shape - never on specific versions.
+#[test]
+fn test_json_project_mode_envelope() {
+    let project = common::create_temp_project_with_requirements();
+
+    let output = Command::cargo_bin("pcu")
+        .unwrap()
+        .arg(project.path())
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "pcu --json should succeed");
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["tool"], "pcu");
+    assert_eq!(value["mode"], "project");
+
+    let checks = value["checks"].as_array().expect("checks should be array");
+    if let Some(first) = checks.first() {
+        // Every check must have at minimum a dependency object with name + spec.
+        assert!(first["dependency"]["name"].is_string());
+        assert!(first["dependency"]["spec"].is_string());
+        assert!(first["latest"].is_string() || first["latest"].is_null());
+    }
+}

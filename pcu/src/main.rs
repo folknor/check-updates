@@ -14,10 +14,46 @@ use pcu::parsers::{
 use pcu::pypi::PyPiClient;
 use pcu::python::get_python_info;
 use pcu::updater::FileUpdater;
-use pcu::uv_python::{generate_uv_python_upgrade_commands, UvPythonDiscovery};
+use pcu::uv_python::{generate_uv_python_upgrade_commands, UvPythonCheck, UvPythonDiscovery};
 use check_updates_core::{DependencyCheck, DependencyResolver};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+
+const SCHEMA_VERSION: u32 = 1;
+const TOOL_NAME: &str = "pcu";
+
+fn errors_to_json(errors: &[String]) -> Vec<serde_json::Value> {
+    errors.iter().map(|e| serde_json::json!({"message": e})).collect()
+}
+
+fn emit_json_project(checks: &[DependencyCheck], errors: &[String]) -> Result<()> {
+    let report = serde_json::json!({
+        "schema_version": SCHEMA_VERSION,
+        "tool": TOOL_NAME,
+        "mode": "project",
+        "checks": checks,
+        "errors": errors_to_json(errors),
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+fn emit_json_global(
+    checks: &[GlobalCheck],
+    python_versions: &[UvPythonCheck],
+    errors: &[String],
+) -> Result<()> {
+    let report = serde_json::json!({
+        "schema_version": SCHEMA_VERSION,
+        "tool": TOOL_NAME,
+        "mode": "global",
+        "checks": checks,
+        "python_versions": python_versions,
+        "errors": errors_to_json(errors),
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,7 +68,7 @@ async fn main() -> Result<()> {
 
 async fn run_global_mode(args: &Args) -> Result<()> {
     // Warn if -u flag is used
-    if args.update {
+    if args.update && !args.json {
         println!(
             "Note: --update flag is ignored in global mode. Commands will be shown instead.\n"
         );
@@ -47,8 +83,10 @@ async fn run_global_mode(args: &Args) -> Result<()> {
         async { uv_python_discovery.discover_and_check().await }
     );
 
-    // Print Python version header
-    if let Some(py_info) = python_info {
+    // Print Python version header (suppress in JSON mode)
+    if !args.json
+        && let Some(py_info) = python_info
+    {
         let version_str = if let Some(ref latest) = py_info.latest {
             if py_info.has_update() {
                 format!(
@@ -66,8 +104,13 @@ async fn run_global_mode(args: &Args) -> Result<()> {
     }
 
     if packages.is_empty() {
-        println!("No globally installed packages found.");
-        println!("Checked: uv tools, pipx, pip --user");
+        if args.json {
+            let uv_checks = uv_python_checks.ok().unwrap_or_default();
+            emit_json_global(&[], &uv_checks, &[])?;
+        } else {
+            println!("No globally installed packages found.");
+            println!("Checked: uv tools, pipx, pip --user");
+        }
         return Ok(());
     }
 
@@ -135,6 +178,15 @@ async fn run_global_mode(args: &Args) -> Result<()> {
     }
 
     // 4. Display results (renderer shows "All packages up to date." per section if needed)
+    if args.json {
+        let uv_checks: Vec<UvPythonCheck> = match &uv_python_checks {
+            Ok(v) => v.clone(),
+            Err(_) => Vec::new(),
+        };
+        emit_json_global(&checks, &uv_checks, &fetch_errors)?;
+        return Ok(());
+    }
+
     let renderer = GlobalTableRenderer::new(true);
     renderer.render(&checks);
 
@@ -194,7 +246,11 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     let detected_files = detector.detect()?;
 
     if detected_files.is_empty() {
-        println!("No dependency files found in {project_path:?}");
+        if args.json {
+            emit_json_project(&[], &[])?;
+        } else {
+            println!("No dependency files found in {project_path:?}");
+        }
         return Ok(());
     }
 
@@ -221,7 +277,11 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     }
 
     if all_dependencies.is_empty() {
-        println!("No dependencies found in any files");
+        if args.json {
+            emit_json_project(&[], &[])?;
+        } else {
+            println!("No dependencies found in any files");
+        }
         return Ok(());
     }
 
@@ -263,8 +323,10 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     let fetch_errors = pypi_result.errors;
     progress_bar.finish_and_clear();
 
-    // Print Python version header
-    if let Some(py_info) = python_info {
+    // Print Python version header (suppress in JSON mode)
+    if !args.json
+        && let Some(py_info) = python_info
+    {
         let version_str = if let Some(ref latest) = py_info.latest {
             if py_info.has_update() {
                 format!(
@@ -281,8 +343,8 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         println!("{version_str}\n");
     }
 
-    // Print fetch errors if any
-    if !fetch_errors.is_empty() {
+    // Print fetch errors if any (suppressed in JSON mode; included in payload)
+    if !fetch_errors.is_empty() && !args.json {
         println!("{}", "Packages not found on PyPI:".dimmed());
         for error in &fetch_errors {
             println!("  {}", error.dimmed());
@@ -320,6 +382,15 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         .collect();
 
     // 6. Display results table
+    if args.json {
+        if args.update {
+            let updater = FileUpdater::new();
+            let _ = updater.apply_updates(&checks, args.minor, args.force)?;
+        }
+        emit_json_project(&checks, &fetch_errors)?;
+        return Ok(());
+    }
+
     let renderer = TableRenderer::new(true);
     let header = if args.update {
         "Dependencies updated:"

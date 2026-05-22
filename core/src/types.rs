@@ -1,18 +1,21 @@
 use crate::version::{Version, VersionSpec};
+use serde::Serialize;
 use std::path::PathBuf;
 
 /// A dependency as parsed from a file (generic across ecosystems)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Dependency {
     /// Package name (normalized)
     pub name: String,
     /// Version specification as parsed
+    #[serde(rename = "spec")]
     pub version_spec: VersionSpec,
     /// Source file this dependency was found in
     pub source_file: PathBuf,
     /// Line number in the source file (1-indexed)
     pub line_number: usize,
     /// Original line text (for updating)
+    #[serde(skip_serializing)]
     pub original_line: String,
 }
 
@@ -30,7 +33,8 @@ pub struct PackageInfo {
 }
 
 /// Severity of an update
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum UpdateSeverity {
     Major,
     Minor,
@@ -38,7 +42,7 @@ pub enum UpdateSeverity {
 }
 
 /// Result of checking a dependency for updates
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DependencyCheck {
     /// The original dependency
     pub dependency: Dependency,

@@ -1,13 +1,14 @@
 use crate::global::UpgradeCommand;
 use check_updates_core::Version;
 use anyhow::Result;
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
 
 /// Information about an installed uv-managed Python version
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct UvPythonInfo {
     /// Full implementation name (e.g., "cpython-3.11.5-linux-x86_64-gnu")
     pub full_name: String,
@@ -22,7 +23,7 @@ pub struct UvPythonInfo {
 }
 
 /// Result of checking a Python series for updates
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct UvPythonCheck {
     /// The major.minor series (e.g., "3.11")
     pub series: String,
