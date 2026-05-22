@@ -492,6 +492,9 @@ mod tests {
             target_spec: Some(VersionSpec::Pinned(Version::new(2, 32, 3))),
             severity: Some(UpdateSeverity::Minor),
             force_spec: Some(VersionSpec::Pinned(Version::new(2, 32, 3))),
+            installed_released_at: None,
+            target_released_at: None,
+            latest_released_at: None,
         };
         let check2 = DependencyCheck {
             dependency: Dependency {
@@ -509,6 +512,9 @@ mod tests {
             target_spec: Some(VersionSpec::Pinned(Version::new(2, 3, 3))),
             severity: Some(UpdateSeverity::Minor),
             force_spec: Some(VersionSpec::Pinned(Version::new(2, 3, 3))),
+            installed_released_at: None,
+            target_released_at: None,
+            latest_released_at: None,
         };
 
         // Create updates with version strings
@@ -561,6 +567,9 @@ mod tests {
                 target_spec: Some(VersionSpec::Pinned(Version::new(1, 0, 200))),
                 severity: Some(UpdateSeverity::Patch),
                 force_spec: Some(VersionSpec::Pinned(Version::new(1, 0, 200))),
+                installed_released_at: None,
+                target_released_at: None,
+                latest_released_at: None,
             },
             DependencyCheck {
                 dependency: Dependency {
@@ -578,6 +587,9 @@ mod tests {
                 target_spec: Some(VersionSpec::Pinned(Version::new(1, 5, 0))),
                 severity: Some(UpdateSeverity::Minor),
                 force_spec: Some(VersionSpec::Pinned(Version::new(1, 5, 0))),
+                installed_released_at: None,
+                target_released_at: None,
+                latest_released_at: None,
             },
         ];
 
@@ -620,6 +632,9 @@ mod tests {
                 target_spec: Some(VersionSpec::Pinned(Version::new(1, 0, 200))),
                 severity: Some(UpdateSeverity::Patch),
                 force_spec: Some(VersionSpec::Pinned(Version::new(1, 0, 200))),
+                installed_released_at: None,
+                target_released_at: None,
+                latest_released_at: None,
             },
             DependencyCheck {
                 dependency: Dependency {
@@ -637,6 +652,9 @@ mod tests {
                 target_spec: Some(VersionSpec::Pinned(Version::new(1, 5, 0))),
                 severity: Some(UpdateSeverity::Minor),
                 force_spec: Some(VersionSpec::Pinned(Version::new(1, 5, 0))),
+                installed_released_at: None,
+                target_released_at: None,
+                latest_released_at: None,
             },
         ];
 

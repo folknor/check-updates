@@ -14,6 +14,10 @@ struct NpmPackageResponse {
     #[serde(rename = "dist-tags")]
     dist_tags: HashMap<String, String>,
     versions: HashMap<String, serde_json::Value>,
+    /// npm's registry response includes a `time` map keyed by version
+    /// (plus "created"/"modified" entries we ignore) with ISO-8601 dates.
+    #[serde(default)]
+    time: HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -68,11 +72,21 @@ impl NpmClient {
 
         let latest_stable = versions.iter().rfind(|v| !v.is_prerelease()).cloned();
 
+        // Map publish dates from the npm `time` field. Skip the
+        // "created"/"modified" meta-entries since they're not version keys.
+        let mut published_at: HashMap<String, String> = HashMap::new();
+        for v in &versions {
+            if let Some(date) = data.time.get(&v.original) {
+                published_at.insert(v.original.clone(), date.clone());
+            }
+        }
+
         Ok(PackageInfo {
             name: data.name,
             versions,
             latest,
             latest_stable,
+            published_at,
         })
     }
 

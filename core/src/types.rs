@@ -1,5 +1,6 @@
 use crate::version::{Version, VersionSpec};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// A dependency as parsed from a file (generic across ecosystems)
@@ -36,6 +37,10 @@ pub struct PackageInfo {
     pub latest: Version,
     /// Latest stable version (no pre-release)
     pub latest_stable: Option<Version>,
+    /// Publish date (ISO-8601 string) per version `original` string.
+    /// Populated by registry clients; may be empty for any version the
+    /// registry did not surface a date for.
+    pub published_at: HashMap<String, String>,
 }
 
 /// Severity of an update
@@ -62,10 +67,19 @@ pub struct DependencyCheck {
     pub target: Option<Version>,
     /// The VersionSpec to write when updating to target
     pub target_spec: Option<VersionSpec>,
-    /// The severity of the update (based on installed → target)
+    /// The severity of the update (based on installed -> target)
     pub severity: Option<UpdateSeverity>,
     /// The VersionSpec to write when force updating to latest
     pub force_spec: Option<VersionSpec>,
+    /// ISO-8601 publish date of the installed version (registry data)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed_released_at: Option<String>,
+    /// ISO-8601 publish date of the target version (registry data)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_released_at: Option<String>,
+    /// ISO-8601 publish date of the latest version (registry data)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_released_at: Option<String>,
 }
 
 impl DependencyCheck {

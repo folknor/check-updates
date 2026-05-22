@@ -152,6 +152,9 @@ mod tests {
             target_spec: Some(VersionSpec::parse(&format!("^{target_version}")).unwrap()),
             severity: Some(severity),
             force_spec: Some(VersionSpec::parse(&format!("^{target_version}")).unwrap()),
+            installed_released_at: None,
+            target_released_at: None,
+            latest_released_at: None,
         }
     }
 

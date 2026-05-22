@@ -6,6 +6,14 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
+#[derive(Debug, Deserialize)]
+struct CrateVersion {
+    num: String,
+    yanked: bool,
+    /// ISO-8601 publish timestamp from crates.io
+    created_at: Option<String>,
+}
+
 /// Client for querying crates.io API
 pub struct CratesIoClient {
     client: reqwest::Client,
@@ -24,12 +32,6 @@ struct CrateResponse {
 #[derive(Debug, Deserialize)]
 struct CrateInfo {
     name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct CrateVersion {
-    num: String,
-    yanked: bool,
 }
 
 impl CratesIoClient {
@@ -72,14 +74,20 @@ impl CratesIoClient {
             .await
             .context(format!("Failed to parse JSON response for '{name}'"))?;
 
-        // Parse all versions, skipping yanked ones
+        // Parse all versions, skipping yanked ones. Track publish dates by
+        // the version's `original` string so the resolver can attach them
+        // to DependencyCheck.
         let mut all_versions: Vec<Version> = Vec::new();
+        let mut published_at: HashMap<String, String> = HashMap::new();
         for version in &crate_data.versions {
             if version.yanked {
                 continue;
             }
 
             if let Ok(v) = Version::from_str(&version.num) {
+                if let Some(date) = &version.created_at {
+                    published_at.insert(v.original.clone(), date.clone());
+                }
                 all_versions.push(v);
             }
         }
@@ -132,6 +140,7 @@ impl CratesIoClient {
             versions: filtered_versions,
             latest,
             latest_stable,
+            published_at,
         })
     }
 

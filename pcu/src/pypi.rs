@@ -29,6 +29,9 @@ struct PyPiInfo {
 struct PyPiRelease {
     #[allow(dead_code)]
     yanked: Option<bool>,
+    /// ISO-8601 upload time. Each release file has its own; the earliest
+    /// across files for a version is the de-facto release date.
+    upload_time_iso_8601: Option<String>,
 }
 
 impl PyPiClient {
@@ -76,8 +79,11 @@ impl PyPiClient {
             .await
             .context(format!("Failed to parse JSON response for '{name}'"))?;
 
-        // Parse all versions from releases
+        // Parse all versions from releases. PyPI tracks an upload time per
+        // file (wheel/sdist) within a release; take the earliest as the
+        // version's release date.
         let mut all_versions: Vec<Version> = Vec::new();
+        let mut published_at: HashMap<String, String> = HashMap::new();
         for (version_str, releases) in &pypi_data.releases {
             // Skip yanked releases (empty release list or all yanked)
             if releases.is_empty() {
@@ -92,6 +98,13 @@ impl PyPiClient {
 
             // Try to parse the version
             if let Ok(version) = Version::from_str(version_str) {
+                let earliest = releases
+                    .iter()
+                    .filter_map(|r| r.upload_time_iso_8601.as_deref())
+                    .min();
+                if let Some(date) = earliest {
+                    published_at.insert(version.original.clone(), date.to_string());
+                }
                 all_versions.push(version);
             }
         }
@@ -144,6 +157,7 @@ impl PyPiClient {
             versions: filtered_versions,
             latest,
             latest_stable,
+            published_at,
         })
     }
 

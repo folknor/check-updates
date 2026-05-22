@@ -9,13 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - `--json` flag on `ccu`, `pcu`, and `ncu` for machine-readable output. Emits a versioned envelope on stdout (`schema_version`, `tool`, `mode`, `checks`, `errors`; `pcu -g` also includes `python_versions`). Status messages and the upgrade hint are suppressed; progress bars stay on stderr. Works alongside `-u` (file edits still happen). Versions and version specs serialize as their canonical string form (e.g. `"1.0.150"`, `"^0.22"`).
+- Every JSON check now carries `installed_released_at`, `target_released_at`, and `latest_released_at` (ISO-8601, omitted when the registry didn't return a date or the corresponding version isn't applicable). Dates come straight from crates.io's `created_at`, PyPI's `upload_time_iso_8601` (earliest file per release), and npm's `time` map.
 - `ccu -g` flag to check globally installed cargo binaries for updates
   - **crates.io** packages: checks for newer versions on crates.io
   - **git** installs (e.g. `cargo install --git`): queries GitHub API to show how many commits behind
   - **local path** installs: detects dirty working trees and commits behind upstream via `git fetch`
 
 ### Fixed
-- `ccu` now handles renamed cargo dependencies — `local_alias = { package = "upstream", ... }` — by querying crates.io with the upstream name. Previously the four renamed deps in lettre (e.g. `tokio1_crate` → `tokio`) reported as "not found on crates.io"; they now resolve and update normally. Multiple aliases for the same crate dedupe to one row.
+- `ccu` now handles renamed cargo dependencies - `local_alias = { package = "upstream", ... }` - by querying crates.io with the upstream name. Previously the four renamed deps in lettre (e.g. `tokio1_crate` -> `tokio`) reported as "not found on crates.io"; they now resolve and update normally. Multiple aliases for the same crate dedupe to one row.
 - `pcu -g` no longer suggests Python versions that uv hasn't built yet (e.g. recommending `uv python install 3.14.4` when uv only has 3.14.3). Both the header and uv-managed Python sections now use `uv python list` as the source of truth instead of endoflife.date API.
 
 ## [0.3.0] - 2026-04-07

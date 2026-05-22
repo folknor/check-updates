@@ -45,6 +45,16 @@ impl DependencyResolver {
             current,
         );
 
+        // Look up registry-published dates for the three versions a consumer
+        // might care about. Missing entries stay as None so the JSON stays
+        // tidy via skip_serializing_if.
+        let lookup_date = |v: Option<&Version>| -> Option<String> {
+            v.and_then(|ver| package_info.published_at.get(&ver.original).cloned())
+        };
+        let installed_released_at = lookup_date(installed);
+        let target_released_at = lookup_date(target.as_ref());
+        let latest_released_at = lookup_date(Some(&latest));
+
         DependencyCheck {
             dependency: dependency.clone(),
             installed: installed.cloned(),
@@ -54,6 +64,9 @@ impl DependencyResolver {
             target_spec,
             severity,
             force_spec,
+            installed_released_at,
+            target_released_at,
+            latest_released_at,
         }
     }
 
@@ -201,6 +214,7 @@ mod tests {
             versions: version_objects,
             latest: latest.clone(),
             latest_stable: Some(latest),
+            published_at: std::collections::HashMap::new(),
         }
     }
 
