@@ -8,10 +8,17 @@ use toml::Value;
 
 /// Parser for Cargo.toml files
 pub struct CargoTomlParser {
-    /// Workspace dependency versions resolved from root Cargo.toml [workspace.dependencies]
-    workspace_deps: HashMap<String, String>,
+    /// Workspace dependency metadata resolved from root Cargo.toml [workspace.dependencies]
+    workspace_deps: HashMap<String, WorkspaceDependency>,
     /// Path to the root Cargo.toml (for correct source_file attribution on workspace deps)
     workspace_root: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceDependency {
+    package_name: String,
+    version: String,
+    manifest_key: Option<String>,
 }
 
 impl CargoTomlParser {
@@ -34,9 +41,23 @@ impl CargoTomlParser {
         if let Some(workspace) = parsed.get("workspace").and_then(|v| v.as_table())
             && let Some(deps) = workspace.get("dependencies").and_then(|v| v.as_table())
         {
-            for (name, value) in deps {
+            for (key, value) in deps {
                 if let Some(version) = self.extract_version(value) {
-                    self.workspace_deps.insert(name.clone(), version);
+                    let package_name = Self::extract_package_rename(value)
+                        .unwrap_or_else(|| key.clone());
+                    let manifest_key = if package_name == *key {
+                        None
+                    } else {
+                        Some(key.clone())
+                    };
+                    self.workspace_deps.insert(
+                        key.clone(),
+                        WorkspaceDependency {
+                            package_name,
+                            version,
+                            manifest_key,
+                        },
+                    );
                 }
             }
         }
@@ -62,9 +83,18 @@ impl CargoTomlParser {
             // Resolve a `package = "..."` rename if present.
             // `name` is the upstream crate name we'll query on crates.io;
             // `key` stays as the local table key for the updater to find.
-            let (name, manifest_key) = match Self::extract_package_rename(value) {
-                Some(upstream) => (upstream, Some(key.clone())),
-                None => (key.clone(), None),
+            let (name, manifest_key) = if is_workspace_ref
+                && let Some(workspace_dep) = self.workspace_deps.get(key)
+            {
+                (
+                    workspace_dep.package_name.clone(),
+                    workspace_dep.manifest_key.clone(),
+                )
+            } else {
+                match Self::extract_package_rename(value) {
+                    Some(upstream) => (upstream, Some(key.clone())),
+                    None => (key.clone(), None),
+                }
             };
 
             if let Some(version_str) = self.extract_version_or_workspace(key, value) {
@@ -167,7 +197,7 @@ impl CargoTomlParser {
             if table.contains_key("git") || table.contains_key("path") {
                 return None;
             }
-            return self.workspace_deps.get(name).cloned();
+            return self.workspace_deps.get(name).map(|dep| dep.version.clone());
         }
 
         None
@@ -439,6 +469,52 @@ direct = "1.0"
         // Only direct dep should be found
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].name, "direct");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_workspace_renamed_dep_resolution() -> Result<()> {
+        let tmp = TempDir::new()?;
+
+        let root_toml = tmp.path().join("Cargo.toml");
+        fs::write(
+            &root_toml,
+            r#"
+[workspace]
+members = ["member"]
+
+[workspace.dependencies]
+tokio1_crate = { package = "tokio", version = "1.38" }
+"#,
+        )?;
+
+        let member_dir = tmp.path().join("member");
+        fs::create_dir(&member_dir)?;
+        let member_toml = member_dir.join("Cargo.toml");
+        fs::write(
+            &member_toml,
+            r#"
+[package]
+name = "member"
+version = "0.1.0"
+
+[dependencies]
+tokio1_crate.workspace = true
+"#,
+        )?;
+
+        let mut parser = CargoTomlParser::new();
+        parser.load_workspace_deps(&root_toml)?;
+
+        let deps = parser.parse(&member_toml)?;
+
+        assert_eq!(deps.len(), 1);
+        let dep = &deps[0];
+        assert_eq!(dep.name, "tokio");
+        assert_eq!(dep.manifest_key.as_deref(), Some("tokio1_crate"));
+        assert_eq!(dep.source_file, root_toml);
+        assert_eq!(dep.version_spec.version_string().expect("version"), "1.38");
 
         Ok(())
     }

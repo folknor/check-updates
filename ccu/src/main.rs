@@ -45,7 +45,7 @@ fn emit_json_project(checks: &[DependencyCheck], errors: &[String]) -> Result<()
     Ok(())
 }
 
-fn emit_json_global(checks: &[GlobalCheck]) -> Result<()> {
+fn emit_json_global(checks: &[GlobalCheck], errors: &[String]) -> Result<()> {
     let with_severity: Vec<GlobalCheckJson<'_>> = checks
         .iter()
         .map(|c| GlobalCheckJson { inner: c, severity: c.update_severity() })
@@ -55,6 +55,7 @@ fn emit_json_global(checks: &[GlobalCheck]) -> Result<()> {
         "tool": TOOL_NAME,
         "mode": "global",
         "checks": with_severity,
+        "errors": errors_to_json(errors),
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -84,7 +85,7 @@ async fn run_global_mode(args: &Args) -> Result<()> {
 
     if packages.is_empty() {
         if args.json {
-            emit_json_global(&[])?;
+            emit_json_global(&[], &[])?;
         } else {
             println!("No globally installed cargo crates found.");
         }
@@ -133,6 +134,7 @@ async fn run_global_mode(args: &Args) -> Result<()> {
 
     let cratesio_result = cratesio_result?;
     let package_infos = cratesio_result.packages;
+    let fetch_errors = cratesio_result.errors;
 
     // 3. Build checks
     let mut checks: Vec<GlobalCheck> = Vec::new();
@@ -201,7 +203,7 @@ async fn run_global_mode(args: &Args) -> Result<()> {
 
     // 4. Render results
     if args.json {
-        emit_json_global(&checks)?;
+        emit_json_global(&checks, &fetch_errors)?;
         return Ok(());
     }
 
