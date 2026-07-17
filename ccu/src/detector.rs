@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use ignore::WalkBuilder;
 use std::fs;
 use std::path::PathBuf;
 use toml::Value;
@@ -111,42 +112,30 @@ impl ProjectDetector {
     }
 
     /// Auto-discover workspace members by recursively scanning subdirectories for Cargo.toml.
-    /// Skips `target/` and hidden directories.
+    ///
+    /// Honors `.gitignore` (and hidden-file) rules so we don't descend into gitignored
+    /// directories such as vendored checkouts or scratch dirs that carry their own,
+    /// unrelated `Cargo.toml` files. Also skips `target/`, which is not gitignored in
+    /// every project.
     fn auto_discover_members(&self) -> Result<Vec<PathBuf>> {
         let mut results = Vec::new();
-        self.scan_dir_recursive(&self.project_path, &mut results)?;
-        results.sort();
-        Ok(results)
-    }
 
-    fn scan_dir_recursive(&self, dir: &std::path::Path, results: &mut Vec<PathBuf>) -> Result<()> {
-        let entries = fs::read_dir(dir)
-            .with_context(|| format!("Failed to read directory {}", dir.display()))?;
+        let walker = WalkBuilder::new(&self.project_path)
+            .filter_entry(|entry| entry.file_name().to_str() != Some("target"))
+            .build();
 
-        for entry in entries {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
+        for entry in walker {
+            let entry = entry.context("Failed to walk project directory")?;
+            if entry.file_name().to_str() != Some("Cargo.toml") {
                 continue;
             }
-
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-
-            // Skip target directories and hidden directories
-            if name_str == "target" || name_str.starts_with('.') {
-                continue;
+            if entry.file_type().is_some_and(|ft| ft.is_file()) {
+                results.push(entry.into_path());
             }
-
-            let candidate = entry.path().join("Cargo.toml");
-            if candidate.exists() {
-                results.push(candidate);
-            }
-
-            // Continue scanning deeper
-            self.scan_dir_recursive(&entry.path(), results)?;
         }
 
-        Ok(())
+        results.sort();
+        Ok(results)
     }
 
     /// Check if a Cargo.toml path matches any of the exclude patterns
@@ -314,6 +303,37 @@ mod tests {
         let detected = detector.detect()?;
         // root + core + desktop (target/ and .hidden/ skipped)
         assert_eq!(detected.len(), 3, "detected: {:?}", detected.iter().map(|d| &d.path).collect::<Vec<_>>());
+        Ok(())
+    }
+
+    #[test]
+    fn test_auto_discover_skips_gitignored_dirs() -> Result<()> {
+        let tmp = TempDir::new()?;
+        // Mark the tree as a git repo so gitignore rules are applied, and ignore research/.
+        fs::create_dir(tmp.path().join(".git"))?;
+        fs::write(tmp.path().join(".gitignore"), "research\n")?;
+
+        // Bare workspace root with no members field -> triggers auto-discovery.
+        create_cargo_toml(tmp.path(), "[workspace]\nresolver = \"2\"\n");
+
+        // A real, tracked member.
+        fs::create_dir(tmp.path().join("core"))?;
+        create_cargo_toml(&tmp.path().join("core"), "[package]\nname = \"core\"\n");
+
+        // A gitignored directory holding unrelated crates (e.g. vendored checkouts).
+        let research = tmp.path().join("research").join("bifrost");
+        fs::create_dir_all(&research)?;
+        create_cargo_toml(&research, "[package]\nname = \"bifrost\"\n");
+
+        let detector = ProjectDetector::new(tmp.path().to_path_buf());
+        let detected = detector.detect()?;
+        // root + core only (research/ gitignored)
+        assert_eq!(
+            detected.len(),
+            2,
+            "detected: {:?}",
+            detected.iter().map(|d| &d.path).collect::<Vec<_>>()
+        );
         Ok(())
     }
 }

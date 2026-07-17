@@ -60,6 +60,7 @@ Do not use your Memory functionality. Do not read, write, or update memories. Do
 - Write substantive engineering-focused commit messages.
 - Has `Cargo.lock` changed? Commit it.
 - Never `git push` unless the user explicitly asks. Stop after the commit.
+- Any user-facing change (new feature, bug fix, behavior change) gets an entry under `## [Unreleased]` in `CHANGELOG.md`, in the matching `Added`/`Changed`/`Fixed` subsection. Include it in the same commit as the code change (CHANGELOG updates are exempt from the "never commit markdown alone" rule since they always ride along with code).
 
 ## Multi-Agent Orchestration
 

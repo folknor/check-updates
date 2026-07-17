@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - **local path** installs: detects dirty working trees and commits behind upstream via `git fetch`
 
 ### Fixed
+- `ccu` workspace auto-discovery (bare `[workspace]` with no `members` field) now honors `.gitignore`, so gitignored directories - vendored checkouts, scratch dirs - are no longer walked and their unrelated `Cargo.toml` files no longer pollute the dependency set. `target/` and hidden dirs are still skipped as before.
 - `ccu` now handles renamed cargo dependencies - `local_alias = { package = "upstream", ... }` - by querying crates.io with the upstream name. Previously the four renamed deps in lettre (e.g. `tokio1_crate` -> `tokio`) reported as "not found on crates.io"; they now resolve and update normally. Multiple aliases for the same crate dedupe to one row.
 - `pcu -g` no longer suggests Python versions that uv hasn't built yet (e.g. recommending `uv python install 3.14.4` when uv only has 3.14.3). Both the header and uv-managed Python sections now use `uv python list` as the source of truth instead of endoflife.date API.
 
