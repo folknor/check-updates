@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-17
+
 ### Added
 - `--json` flag on `ccu`, `pcu`, and `ncu` for machine-readable output. Emits a versioned envelope on stdout (`schema_version`, `tool`, `mode`, `checks`, `errors`; `pcu -g` also includes `python_versions`). Status messages and the upgrade hint are suppressed; progress bars stay on stderr. Works alongside `-u` (file edits still happen). Versions and version specs serialize as their canonical string form (e.g. `"1.0.150"`, `"^0.22"`).
 - Every JSON check now carries `installed_released_at`, `target_released_at`, and `latest_released_at` (ISO-8601, omitted when the registry didn't return a date or the corresponding version isn't applicable). Dates come straight from crates.io's `created_at`, PyPI's `upload_time_iso_8601` (earliest file per release), and npm's `time` map.
