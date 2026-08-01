@@ -34,7 +34,6 @@ Use `brokkr` (not `cargo`) for check/test. By default output is filtered to chan
 - Don't use gremlins! Em-dash, en-dash, strange quotes, whatever - they're all verboten.
 - Don't remind the user of the rules. They wrote them, so they know them.
 - The user can exempt you from any rule at any time.
-- Subagents must always be launched in the foreground, (never use `run_in_background: true`) so the user can approve tool requests.
 
 ### Memory rules
 
@@ -69,7 +68,7 @@ Do NOT use worktree isolation for parallel agents. Instead, launch agents in the
 Agent coordination rules:
 
 - Each agent gets exclusive ownership of specific files. No two agents touch the same file.
-- Agents must NOT run `cargo` or `brokkr`. The orchestrator validates between agents.
+- Agents must NOT run `brokkr` or `cargo`. The orchestrator validates between agents.
 
 ## Workspace Conventions
 
@@ -110,3 +109,37 @@ ccu compares the **installed version** (from `Cargo.lock`) against the **latest 
 ## Testing
 
 25 tests across parser, detector, updater, crates.io, and global modules. Detector tests use `TempDir` to create temporary workspace layouts.
+
+## Document folders
+
+The standing layout, across every project. Three live folders plus one retired,
+split by durability first, subject second.
+
+| Folder | Contents | Rule |
+|---|---|---|
+| `reference/` | Durable in-repo reference for anyone working on or with the code - how the thing is built and why: `architecture.md`, `technical-implementation-spec.md`, `performance.md` (the durable record of measured numbers over time), invariants, protocol contracts | Citable from source as a source of truth. What it says must be true. |
+| `docs/` | Durable in-repo documentation of how the thing is used - guides, CLI reference, the consumer-facing API surface. Sometimes exposed as a hand-edited VitePress gh-pages site | Same must-be-true rule. |
+| `notes/` | Transient - work items (`todo.md`), future plans, hypotheticals, bug reports, research, analysis. Things that will die | No truth guarantee. Nothing durable cites it. |
+| `plans/` | Retired | Plan documents are transient: they go in `notes/`. |
+
+`reference/` and `docs/` are both durable and both binding. The difference is
+subject, not audience: `reference/` covers how the thing is built and why - what
+you need in order to change it safely - while `docs/` covers how it is used. A
+developer or library consumer reads both. Where a project publishes a site,
+`docs/` is what gets published; the folder means the same thing either way.
+`notes/` is neither durable nor binding, which is the whole point of keeping it
+separate: a document that may be wrong must not sit where a document that must
+be right is expected.
+
+The dependency direction is therefore one-way. `notes/` may cite `docs/` and
+`reference/`; nothing durable may cite `notes/` - not a code comment, not
+`docs/`, not `reference/`. A code comment must carry its full context, because
+it outlives the note.
+
+**Root-level convention files are exempt.** `AGENTS.md`, `CLAUDE.md`,
+`README.md`, `LICENSE`, `CHANGELOG.md` and their kin are found by tooling and by
+convention at the repository root, and stay there. These folders govern
+documents we chose where to put, not files whose location is dictated.
+
+In `notes/`, `docs/` and `reference/` alike, avoid citing source line numbers -
+they drift fast.
