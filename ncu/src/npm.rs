@@ -294,18 +294,9 @@ impl NpmClient {
             ));
         }
 
-        // `latest` feeds the resolver's force and
-        // fallback target, so it must obey the same prerelease policy as
-        // `versions`:
-        //
-        // - without `-p`, a `dist-tags.latest` pointing at a prerelease must
-        //   not be used, or `--force` writes a prerelease the user excluded;
-        // - with `-p`, `dist-tags.latest` must not cap the target either, or
-        //   `-p -uf` can never upgrade *to* a prerelease.
-        //
-        // In stable mode the npm `latest` tag stays authoritative - it is
-        // deliberately allowed to point below the highest published stable
-        // version (a maintenance release on an older line).
+        // `latest` must obey the prerelease policy, so a `dist-tags.latest`
+        // pointing at a prerelease is not used without `-p` - otherwise
+        // `--force` writes a prerelease the user asked to exclude.
         let tagged_latest = data
             .dist_tags
             .get("latest")
@@ -323,14 +314,24 @@ impl NpmClient {
             })?
             .clone();
 
-        let latest = match tagged_latest {
-            // Prereleases requested: never let the stable tag cap the target.
-            Some(tag) if self.include_prerelease => tag.max(newest),
-            // Stable mode: npm's `latest` tag is the recommended release even
-            // when a higher stable version exists on another line.
-            Some(tag) => tag,
-            None => newest,
-        };
+        // The `latest` tag never caps the reported version, in either mode.
+        //
+        // `dist-tags.latest` is whatever was published most recently without an
+        // explicit `--tag`. It is not "the highest version": a maintainer who
+        // backports 1.5.1 after shipping 2.0.0 moves the tag backwards, and it
+        // stays there.
+        //
+        // In that state neither npm tool mentions 2.0.0. `npm update` resolves
+        // inside the declared range, so it stops at 1.5.1; `npm outdated`
+        // prints the tag in its Latest column, so it also says 1.5.1. Capping
+        // here would reproduce that blind spot in the one tool whose job is to
+        // cover it.
+        //
+        // The tag is not discarded - it still decides `latest` whenever it is
+        // the highest admissible version. Reporting the higher release is a
+        // reporting decision only: severity classifies the jump and
+        // `will_update` keeps it behind `--force`.
+        let latest = tagged_latest.map_or(newest.clone(), |tag| tag.max(newest));
 
         let latest_stable = versions.iter().rfind(|v| !v.is_prerelease()).cloned();
 
@@ -482,6 +483,26 @@ mod tests {
             .build_package_info("demo", fixture(json))
             .expect("builds");
         assert_eq!(info.latest.original, "2.0.0-beta.2");
+    }
+
+    #[test]
+    fn stable_tag_does_not_cap_the_target_below_a_higher_stable_release() {
+        // `dist-tags.latest` is the most recent publish, not the highest
+        // version, so a backport after 2.1.0 leaves it pointing at 1.5.0. A
+        // user on ^1.4.0 is told 1.5.0 by `npm update` (range-bound) and 1.5.0
+        // by `npm outdated` (tag-bound); 2.1.0 goes unmentioned by both.
+        let client = NpmClient::new(false);
+        let json = r#"{
+            "name": "demo",
+            "dist-tags": { "latest": "1.5.0" },
+            "versions": { "1.4.0": {}, "1.5.0": {}, "2.1.0": {} },
+            "time": {}
+        }"#;
+        let info = client
+            .build_package_info("demo", fixture(json))
+            .expect("builds");
+        assert_eq!(info.latest.original, "2.1.0");
+        assert!(!info.latest.is_prerelease());
     }
 
     #[test]
