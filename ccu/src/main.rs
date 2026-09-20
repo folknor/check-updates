@@ -99,8 +99,67 @@ struct UncheckedDependency {
     section: Option<String>,
 }
 
+/// Identity of a *declaration*, used to keep the JSON `checks` array from
+/// repeating one.
+///
+/// `CargoTomlParser` resolves every member's `.workspace = true` entry against
+/// `[workspace.dependencies]` and attributes the result to the root manifest,
+/// so a crate shared by N members produces N checks that name the same file and
+/// the same line. The human table never showed those - it dedupes on
+/// `(name, target)` - so `--json` and the table disagreed about the same run.
+///
+/// The key is what the updater addresses: name, file and line. Two declarations
+/// on different lines stay distinct even when they resolve to the same version,
+/// because they are genuinely two things a consumer may want to act on; that is
+/// why this is narrower than the display key. When the line is unknown the
+/// section and the declared spec stand in for it, so nothing is collapsed on the
+/// strength of a missing field.
+fn declaration_identity(check: &DependencyCheck) -> String {
+    let dep = &check.dependency;
+    match dep.line_number {
+        Some(line) => format!("{}|{}|{line}", dep.name, dep.source_file.display()),
+        None => format!(
+            "{}|{}|{}|{}",
+            dep.name,
+            dep.source_file.display(),
+            dep.section.as_deref().unwrap_or_default(),
+            dep.version_spec
+        ),
+    }
+}
+
+/// One entry per distinct declaration, order preserved.
+fn dedupe_declarations(checks: &[DependencyCheck]) -> Vec<&DependencyCheck> {
+    let mut seen: HashSet<String> = HashSet::new();
+    checks
+        .iter()
+        .filter(|c| seen.insert(declaration_identity(c)))
+        .collect()
+}
+
+/// Under `--update --force` the writer uses `force_spec`, which `resolve`
+/// computes from `latest` - not from `target`, which is capped by the declared
+/// constraint. The table printed `target` regardless, so `-uf` reported
+/// `2.28.0 -> 2.30.0 (2.32.3 available)` and then wrote 2.32.3, and derived the
+/// severity column from the smaller jump as well.
+///
+/// `-f` is documented as "force update all to absolute latest", so the write is
+/// right and the row was wrong. This retargets the row onto `latest` and
+/// recomputes the severity from the same pair, for display only: `force_spec`
+/// is untouched, so `will_update` and `update_blocker` answer exactly as before
+/// and `apply_updates` still sees the original checks.
+fn retarget_forced(check: &DependencyCheck) -> DependencyCheck {
+    let mut forced = check.clone();
+    forced.severity =
+        DependencyResolver::calculate_severity(check.current_version(), Some(&check.latest));
+    forced.target = Some(check.latest.clone());
+    forced.target_spec = check.force_spec.clone();
+    forced.target_released_at = check.latest_released_at.clone();
+    forced
+}
+
 fn emit_json_project(
-    checks: &[DependencyCheck],
+    checks: &[&DependencyCheck],
     errors: &[FetchError],
     unchecked: &[UncheckedDependency],
 ) -> Result<()> {
@@ -482,9 +541,17 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         }
     }
 
-    // 5. Deduplicate for display (same crate with same target)
+    // 5. Deduplicate for display (same crate with same target).
+    //
+    // Under `-uf` the rows are retargeted onto `latest` first, because that is
+    // what `apply_updates` will write. The retargeting is a display copy; every
+    // write below still goes through `checks`.
+    let forced_display: Option<Vec<DependencyCheck>> =
+        (args.update && args.force).then(|| checks.iter().map(retarget_forced).collect());
+    let display_checks: &[DependencyCheck] = forced_display.as_deref().unwrap_or(&checks);
+
     let mut seen: HashSet<String> = HashSet::new();
-    let deduplicated: Vec<&DependencyCheck> = checks
+    let deduplicated: Vec<&DependencyCheck> = display_checks
         .iter()
         .filter(|c| {
             if !c.has_update() {
@@ -514,7 +581,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
             let result = updater.apply_updates(&checks, args.minor, args.force)?;
             result.print_not_applied();
         }
-        emit_json_project(&checks, &fetch_failures, &unchecked)?;
+        emit_json_project(&dedupe_declarations(&checks), &fetch_failures, &unchecked)?;
         return Ok(());
     }
 
@@ -596,4 +663,69 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dedupe_declarations, retarget_forced};
+    use check_updates_core::{Dependency, DependencyCheck, UpdateSeverity, Version, VersionSpec};
+    use std::path::PathBuf;
+
+    /// One workspace-inherited declaration as the parser emits it: every
+    /// inheriting member resolves to the same root manifest and the same line.
+    fn inherited_check(section: &str) -> DependencyCheck {
+        DependencyCheck {
+            dependency: Dependency {
+                name: "serde".to_string(),
+                version_spec: VersionSpec::Caret(Version::new(1, 0, 190)),
+                source_file: PathBuf::from("/w/Cargo.toml"),
+                line_number: Some(7),
+                original_line: "serde = \"1.0.190\"".to_string(),
+                manifest_key: None,
+                section: Some(section.to_string()),
+            },
+            installed: Some(Version::new(1, 0, 190)),
+            in_range: Some(Version::new(1, 0, 195)),
+            latest: Version::new(2, 1, 0),
+            target: Some(Version::new(1, 0, 195)),
+            target_spec: Some(VersionSpec::Caret(Version::new(1, 0, 195))),
+            severity: Some(UpdateSeverity::Patch),
+            force_spec: Some(VersionSpec::Caret(Version::new(2, 1, 0))),
+            installed_released_at: None,
+            target_released_at: Some("2023-10-01".to_string()),
+            latest_released_at: Some("2025-01-01".to_string()),
+        }
+    }
+
+    #[test]
+    fn json_checks_carry_one_entry_per_declaration() {
+        let checks = vec![
+            inherited_check("dependencies"),
+            inherited_check("dev-dependencies"),
+            inherited_check("dependencies"),
+        ];
+        assert_eq!(dedupe_declarations(&checks).len(), 1);
+    }
+
+    #[test]
+    fn distinct_lines_stay_distinct_even_at_the_same_target() {
+        let mut other = inherited_check("dependencies");
+        other.dependency.line_number = Some(42);
+        let checks = vec![inherited_check("dependencies"), other];
+        assert_eq!(dedupe_declarations(&checks).len(), 2);
+    }
+
+    #[test]
+    fn forced_rows_display_the_version_force_will_write() {
+        let forced = retarget_forced(&inherited_check("dependencies"));
+        assert_eq!(forced.target, Some(Version::new(2, 1, 0)));
+        assert_eq!(forced.severity, Some(UpdateSeverity::Major));
+        assert_eq!(forced.target_released_at.as_deref(), Some("2025-01-01"));
+        // Nothing that decides what gets written may move.
+        assert_eq!(
+            forced.force_spec.as_ref().map(ToString::to_string),
+            Some(VersionSpec::Caret(Version::new(2, 1, 0)).to_string())
+        );
+        assert!(!forced.has_newer_available());
+    }
 }

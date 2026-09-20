@@ -23,7 +23,7 @@ Run `pcu` in a Python project directory to see outdated dependencies.
 | `-m` | Include minor updates (use with `-u` as `-um`) |
 | `-f` | Force update all to absolute latest (use with `-u` as `-uf`) |
 | `-p` | Include pre-release versions |
-| `--json` | Emit machine-readable JSON on stdout (status messages go to stderr) |
+| `--json` | Emit machine-readable JSON on stdout (human-readable output is suppressed; warnings go to stderr) |
 
 ### Example
 

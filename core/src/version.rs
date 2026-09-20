@@ -590,51 +590,72 @@ fn compare_local(a: Option<&String>, b: Option<&String>) -> Ordering {
     }
 }
 
+/// Compare two versions on everything *except* the local segment.
+///
+/// This is the comparison PEP 440 uses for version matching: a specifier that
+/// carries no local segment matches a candidate regardless of the candidate's
+/// local segment, so `==1.0.0` matches `1.0.0+cu118`. Ordering still takes the
+/// local segment into account - see the note on [`Version`] - and that is a
+/// different question from whether a specifier matches.
+fn cmp_ignoring_local(a: &Version, b: &Version) -> Ordering {
+    match a.epoch.cmp(&b.epoch) {
+        Ordering::Equal => {}
+        ord => return ord,
+    }
+    match compare_release(&a.release, &b.release) {
+        Ordering::Equal => {}
+        ord => return ord,
+    }
+
+    match phase(a).cmp(&phase(b)) {
+        Ordering::Equal => {}
+        ord => return ord,
+    }
+
+    // Within a phase both sides carry the same kind of marker, so each part
+    // is compared in PEP 440's order: pre, then post, then dev.
+    let pre = match (&a.pre_release, &b.pre_release) {
+        (Some(x), Some(y)) => compare_prerelease(x, y),
+        _ => Ordering::Equal,
+    };
+    if pre != Ordering::Equal {
+        return pre;
+    }
+
+    // A post-release is newer than the release it patches, so absent sorts
+    // below present here.
+    match a.post.cmp(&b.post) {
+        Ordering::Equal => {}
+        ord => return ord,
+    }
+
+    // A dev-release is older than the thing it leads up to, so present
+    // sorts below absent - the reverse of `post`.
+    match (a.dev, b.dev) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+/// Whether `version` matches the version named by a specifier, under PEP 440's
+/// local-segment rule: a specifier with no local segment ignores the
+/// candidate's, while one that names a local segment requires it exactly.
+fn matches_specifier_version(version: &Version, spec: &Version) -> bool {
+    if spec.local.is_none() {
+        cmp_ignoring_local(version, spec) == Ordering::Equal
+    } else {
+        version == spec
+    }
+}
+
 impl Ord for Version {
     fn cmp(&self, other: &Self) -> Ordering {
-        match self.epoch.cmp(&other.epoch) {
+        match cmp_ignoring_local(self, other) {
             Ordering::Equal => {}
             ord => return ord,
         }
-        match compare_release(&self.release, &other.release) {
-            Ordering::Equal => {}
-            ord => return ord,
-        }
-
-        match phase(self).cmp(&phase(other)) {
-            Ordering::Equal => {}
-            ord => return ord,
-        }
-
-        // Within a phase both sides carry the same kind of marker, so each part
-        // is compared in PEP 440's order: pre, then post, then dev.
-        let pre = match (&self.pre_release, &other.pre_release) {
-            (Some(a), Some(b)) => compare_prerelease(a, b),
-            _ => Ordering::Equal,
-        };
-        if pre != Ordering::Equal {
-            return pre;
-        }
-
-        // A post-release is newer than the release it patches, so absent sorts
-        // below present here.
-        match self.post.cmp(&other.post) {
-            Ordering::Equal => {}
-            ord => return ord,
-        }
-
-        // A dev-release is older than the thing it leads up to, so present
-        // sorts below absent - the reverse of `post`.
-        let dev = match (self.dev, other.dev) {
-            (Some(a), Some(b)) => a.cmp(&b),
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (None, None) => Ordering::Equal,
-        };
-        if dev != Ordering::Equal {
-            return dev;
-        }
-
         compare_local(self.local.as_ref(), other.local.as_ref())
     }
 }
@@ -873,6 +894,16 @@ impl VersionSpec {
             let version = Version::from_str(version_str)?;
             return Ok(VersionSpec::LessThan(version));
         }
+        // Cargo and npm both spell an exact pin with a single `=` (`=1.2.3`).
+        // This branch has to come last among the operators so that `==`, `>=`,
+        // `<=`, `!=` and `~=` are all claimed by their own arms first. Without
+        // it the spec fell through to `Complex`, which is not rewritable, so an
+        // exactly pinned Cargo dependency was silently never updated - not even
+        // under `-uf` - and never matched a lock entry either.
+        if let Some(version_str) = s.strip_prefix('=') {
+            let version = Version::from_str(version_str)?;
+            return Ok(VersionSpec::Pinned(version));
+        }
 
         // No operator - treat as pinned or complex
         if let Ok(version) = Version::from_str(s) {
@@ -886,7 +917,11 @@ impl VersionSpec {
     pub fn satisfies(&self, version: &Version) -> bool {
         match self {
             VersionSpec::Any => true,
-            VersionSpec::Pinned(v) => version == v,
+            // PEP 440: a specifier that names no local segment matches any
+            // local version, so `==1.0.0` matches `1.0.0+cu118`. Semver says
+            // the same about build metadata, so this holds for all three
+            // ecosystems. `!=` is defined as the inverse of `==` and follows.
+            VersionSpec::Pinned(v) => matches_specifier_version(version, v),
             VersionSpec::Minimum(v) => version >= v,
             VersionSpec::Maximum(v) => version <= v,
             VersionSpec::GreaterThan(v) => version > v,
@@ -950,7 +985,7 @@ impl VersionSpec {
                     }
                 }
             }
-            VersionSpec::NotEqual(v) => version != v,
+            VersionSpec::NotEqual(v) => !matches_specifier_version(version, v),
             VersionSpec::Complex(_) => false, // Can't evaluate complex constraints; don't claim in-range
         }
     }
@@ -1162,6 +1197,63 @@ mod tests {
             VersionSpec::parse(">=1.0.0,<2.0.0").unwrap(),
             VersionSpec::Range { .. }
         ));
+    }
+
+    // Cargo's exact pin is a single `=`. It used to fall through to `Complex`,
+    // which is not rewritable, so the dependency was never updated.
+    #[test]
+    fn single_equals_is_an_exact_pin() {
+        let spec = VersionSpec::parse("=1.2.3").unwrap();
+        assert_eq!(
+            spec,
+            VersionSpec::Pinned(Version::from_str("1.2.3").unwrap())
+        );
+        assert!(spec.satisfies(&Version::from_str("1.2.3").unwrap()));
+        assert!(!spec.satisfies(&Version::from_str("1.2.4").unwrap()));
+        assert!(spec.is_rewritable());
+        // The two-character operators keep their own meaning.
+        assert!(matches!(
+            VersionSpec::parse(">=1.2.3").unwrap(),
+            VersionSpec::Minimum(_)
+        ));
+        assert!(matches!(
+            VersionSpec::parse("<=1.2.3").unwrap(),
+            VersionSpec::Maximum(_)
+        ));
+        assert!(matches!(
+            VersionSpec::parse("!=1.2.3").unwrap(),
+            VersionSpec::NotEqual(_)
+        ));
+        assert!(matches!(
+            VersionSpec::parse("~=1.2.3").unwrap(),
+            VersionSpec::Compatible(_)
+        ));
+        assert!(matches!(
+            VersionSpec::parse("=1.2.*").unwrap(),
+            VersionSpec::Wildcard { .. }
+        ));
+    }
+
+    // PEP 440: a specifier with no local segment matches any local version.
+    // Ordering still separates them - only matching ignores the segment.
+    #[test]
+    fn pin_without_a_local_segment_matches_a_local_version() {
+        let spec = VersionSpec::parse("==1.0.0").unwrap();
+        assert!(spec.satisfies(&Version::from_str("1.0.0+cu118").unwrap()));
+        assert!(!spec.satisfies(&Version::from_str("1.0.1+cu118").unwrap()));
+
+        // A specifier that names a local segment requires that exact one.
+        let exact = VersionSpec::parse("==1.0.0+cu118").unwrap();
+        assert!(exact.satisfies(&Version::from_str("1.0.0+cu118").unwrap()));
+        assert!(!exact.satisfies(&Version::from_str("1.0.0+cpu").unwrap()));
+        assert!(!exact.satisfies(&Version::from_str("1.0.0").unwrap()));
+
+        // `!=` is the inverse of `==` and follows the same rule.
+        let excluded = VersionSpec::parse("!=1.0.0").unwrap();
+        assert!(!excluded.satisfies(&Version::from_str("1.0.0+cu118").unwrap()));
+
+        // Ordering is unchanged: the local segment still participates.
+        assert!(Version::from_str("1.0.0").unwrap() < Version::from_str("1.0.0+cu118").unwrap());
     }
 
     // The patch number of a named pre-release must survive parsing: an earlier

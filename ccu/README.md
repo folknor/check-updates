@@ -23,7 +23,7 @@ Run `ccu` in a Rust project directory to see outdated dependencies. Supports wor
 | `-m` | Include minor updates (use with `-u` as `-um`) |
 | `-f` | Force update all to absolute latest (use with `-u` as `-uf`) |
 | `-p` | Include pre-release versions |
-| `--json` | Emit machine-readable JSON on stdout (status messages go to stderr) |
+| `--json` | Emit machine-readable JSON on stdout (human-readable output is suppressed; warnings go to stderr) |
 
 ### Example
 
@@ -51,7 +51,15 @@ $ ccu --json | jq '.checks[] | select(.severity != null) | {name: .dependency.na
 }
 ```
 
-Schema: `{ schema_version, tool, mode, checks[], errors[] }`. In `-g` mode each check includes `source` (`registry` / `git` / `path`) and source-specific fields (`latest_version`, `git_url`, `git_hash`, `latest_hash`, `commits_behind`, `local_path`, `has_dirty_changes`).
+Schema: `{ schema_version, tool, mode, checks[], unchecked[], errors[] }`. `unchecked[]` lists dependencies that were found but could not be looked up (`name`, `source_file`, `section`); `errors[]` carries one entry per failed registry lookup (`package`, `kind`, `message`), where `kind` separates `not_found` from failures like a rate limit.
+
+In `-g` mode there is no `unchecked[]`, and each check nests the installed package under `package`:
+
+```
+$ ccu -g --json | jq '.checks[] | {name: .package.name, source: .package.source, installed: .package.installed_version, latest: .latest_version}'
+```
+
+`package` carries `name`, `installed_version`, `source` (`registry` / `git` / `path`), `binaries`, `git_url`, `git_hash` and `local_path`. The check itself carries `latest_version`, `latest_hash`, `commits_behind`, `has_dirty_changes`, `has_update`, `check_failed` and `severity`. `check_failed: true` means `has_update: false` is "unknown", not "up to date".
 
 ## Supported files
 

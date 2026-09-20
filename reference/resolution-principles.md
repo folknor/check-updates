@@ -4,36 +4,6 @@ What these tools are for, and the rules that follow from it. This page is
 binding: code that contradicts it is wrong, and a finding that proposes
 contradicting it should be refused with a pointer here.
 
-## What counts as a bug
-
-Read this before acting on any defect report, including the ones in `notes/`.
-Those documents were produced by automated hunters and mix genuine defects with
-opinions about how the tools ought to behave. The two are not the same and must
-not be treated the same.
-
-**It is a bug when the code contradicts something stated.** Its own doc comment,
-a README, the CLI help text, a specification it claims to implement (semver,
-PEP 440, PEP 508, npm range syntax, Cargo's manifest format), or itself -
-reporting one thing and doing another. Fix it.
-
-**It is not a bug when the behaviour is merely judged suboptimal.** However
-well-argued, however many agents agree, a preference about semantics is a
-feature request. Leave the behaviour alone and say so in the report.
-
-The test has teeth because the failure is easy to miss from inside: a defect
-report written as prose about a real code path reads exactly like a bug whether
-or not any contract was broken. Ask which sentence, in which file, the code
-fails to honour. If there is no such sentence, it is not a bug.
-
-A useful check on the finished work: the `CHANGELOG.md` entry. Fixing bugs does
-not require explaining new behaviour to users, so a run of defect fixes should
-collapse to roughly "bugs fixed". A long `### Changed` section is evidence that
-behaviour was altered on someone's opinion, and each entry in it should be able
-to name the contract it restored.
-
-Behaviour changes are not forbidden - they are simply not this. They are the
-user's call, asked for explicitly, and they belong in their own commits.
-
 ## The purpose
 
 `ccu`, `pcu` and `ncu` are **opportunistic**. They exist to report newer

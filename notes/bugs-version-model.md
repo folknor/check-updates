@@ -1,12 +1,5 @@
 # Version model defects (VER)
 
-0. Not every entry here is a bug. These documents were produced by automated
-   hunters and mix genuine defects with opinions about how the tools ought to
-   behave. Before acting on an entry, apply the test in
-   `reference/resolution-principles.md`: a bug is the code contradicting
-   something stated - its own doc comment, a README, the CLI help, a spec it
-   claims to implement, or itself. A preference about semantics is a feature
-   request; leave the behaviour alone and say so.
 1. An entry is removed entirely when completely resolved. No historical record
    stays here.
 2. Stable IDs never change and are never reused; removal leaves a gap.
@@ -18,50 +11,6 @@
 
 Findings about `core/src/version.rs`, `core/src/resolver.rs` and the shared
 `Version` / `VersionSpec` model. Every CLI inherits these.
-
-## VER-019 - two PEP 440 residuals from the version-model restructure
-
-Both verified during review, both judged not worth an ecosystem discriminant
-today, both recorded so they are not rediscovered as fresh defects.
-
-- `1.0-1` is an implicit post-release under PEP 440 (`1.0.post1`) but parses
-  through the semver branch as the pre-release `"1"`. PyPI normalises versions
-  in its JSON responses, so this only reaches us from a hand-written pin.
-- `==1.0.0` no longer satisfies `1.0.0+cu118`. PEP 440 says a specifier with no
-  local segment matches any local version. Worth revisiting if `in_range` for a
-  pinned torch-style dependency looks wrong.
-
-Context for whoever picks these up: `local` now participates in ordering for all
-three ecosystems, which is a deliberate deviation from semver precedence. It is
-unobservable on crates.io and npm - both registries reject a publish that
-differs from an existing release only in build metadata - and it is required for
-PyPI, where `2.1.0+cu118` and `2.1.0+cpu` are distinct releases. Ordering a
-local segment can only make a version visible that equality would have
-collapsed, never hide one, so principle 1 settles it without needing to know
-which tool is asking.
-
-## VER-017 - conda wildcards now resolve correctly and still cannot be written
-
-Narrowed to its last part, and that part is now the only thing standing between
-a conda prefix pin and a working update.
-
-Fixed in `core`: `VersionSpec::Wildcard` carries a `base: Version` (the prefix
-parsed and zero-filled), so `base_version()` returns `Some` and a wildcard
-dependency in a lock-less project gets a `current`, a severity and a rewritable
-spec. `with_version` preserves all three precisions, so `1.24.0.*` bumps to
-`1.26.3.*` instead of widening to `1.26.*`. `Wildcard::satisfies` compares
-parsed numeric fields by declared precision rather than string prefixes.
-
-Residue: `pcu/src/updater.rs::replace_in_conda` has no `==X.*` <-> `=X`
-mapping. It tries the literal spec, then a blanket `==` -> `=` substitution. For
-a conda line `numpy=1.24` the parser produces a `Wildcard` rendering as
-`==1.24.*`, which becomes `=1.24.*` and does not match the text `=1.24` in the
-file. So the dependency now computes a correct target, severity and spec - and
-is still silently not written. The fix is to strip the `.*` when the source line
-used conda's bare `=` prefix form.
-
-One form already works: a line spelled `python=3.9.*` matches after the
-`==`->`=` substitution.
 
 ## VER-018 - `VersionSpec::parse` cannot fail, which makes `if let Ok` a no-op
 
@@ -87,78 +36,6 @@ Two consequences worth recording:
 This intersects VER-008 and VER-013: the question those entries raise - whether
 an unmodellable spec should be a hard error or a silent `Complex` - is currently
 answered "always `Complex`, everywhere, with no way for a caller to tell".
-
-## VER-007 - Cargo's single-`=` exact pin degrades to an unrewritable `Complex`
-
-Reported by core and ccu.
-
-`VersionSpec::parse` handles `==`, `>=`, `<=`, `!=`, `>`, `<` (Python style) but
-never bare `=`. `ccu/src/parsers/cargo_toml.rs::parse_cargo_version` routes
-anything starting with `=` into it; no operator branch matches,
-`Version::from_str("=1.2.3")` fails, and it falls through to
-`Complex("=1.2.3")`. `=x.y.z` is standard Cargo syntax. Downstream:
-
-- `satisfies()` returns `false` for `Complex`, so `in_range` is always `None`;
-- `is_rewritable()` is false, so `target_spec` and `force_spec` are `None` and
-  `will_update` is false even under `-uf` - the dep is silently never updated;
-- the installed-version picker in `ccu/src/main.rs` filters `Cargo.lock` entries
-  by `satisfies`, gets an empty set, and falls back to "highest overall version
-  in the lock file", which for a crate present at two majors (e.g. `syn` 1.x and
-  2.x) picks the *transitive* version, not the pinned one, and produces a wrong
-  severity.
-
-No diagnostic at any point.
-
-## VER-008 - the blocked-row signal exists but the update tables filter it out
-
-Reported by core, ccu, pcu-parsers (and as the mechanism behind VER-007 and
-DSC-007). The hunters' split is now settled by evidence rather than argument:
-`Complex` stays the safe landing place (a rewrite would have to discard the part
-that was not understood), and the defect was only ever the silence.
-
-The signal landed. `core::UpdateBlocker` distinguishes `UnmodellableSpec`,
-`UnconstrainedSpec` and `NoWritableTarget`; `DependencyCheck::update_blocker()`
-is defined as "has an update but is not writable under the most permissive
-flags", so a major withheld by plain `-u` is *not* flagged and stays in the
-existing "run `-uf`" count. The table carries a yellow marker inside the
-severity column and prints one legend line per distinct reason with a row count.
-`--json` gains `updatable` and `blocked_reason`.
-
-Residue, and it defeats the whole thing until fixed - in all three `main.rs`:
-
-- The `--update` display list filters on `!will_update(args.minor, args.force)`,
-  which drops blocked rows from the table **entirely**. That is the rule-3
-  violation the marker was built to fix, one layer above where the marker can
-  reach. The filter needs `|| c.update_blocker().is_some()`.
-- The `skipped` count conflates "excluded by your filter" with "cannot be
-  written at all" and tells the user to `Run -uf to force upgrade all`, which is
-  false for a blocked row.
-- `UpdateBlocker` is only reachable as `check_updates_core::types::UpdateBlocker`
-  and should join the `pub use types::{...}` line in `core/src/lib.rs`.
-
-## VER-010 - the independent-field severity comparison survives in four more places
-
-Reported by core, ccu, ncu. Fixed in `core/src/resolver.rs`: ordering now decides
-whether there is an update at all and the fields only choose the name, so `None`
-means "not an update" and nothing else.
-
-The same hand-rolled comparison was copied into global mode in all three tools
-and into pcu's Python reporting, none of which call the fixed function:
-
-- `ccu/src/global.rs::update_severity`
-- `pcu/src/global.rs::update_severity`
-- `ncu/src/global.rs::update_severity`
-- `pcu/src/uv_python.rs::is_patch_update`
-
-All four still return `None` for a move that does not change the triple - a
-prerelease-to-release, a gained post-release, a fourth release segment, a local
-segment - and all four still misclassify a lower-minor/higher-patch target. They
-should call `DependencyResolver::calculate_severity`, which now holds the one
-correct definition.
-
-This is where the pcu global-mode *downgrade* symptom actually lived. The
-`1.4.0.post1 -> 1.4.0` command is already gone, because `has_update` there is
-computed from the corrected `Ord`, but the severity half is untouched.
 
 ## VER-013 - `VersionSpec::parse` only models a two-clause range
 

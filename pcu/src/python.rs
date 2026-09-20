@@ -1,4 +1,4 @@
-use crate::uv_python::{UvPythonDiscovery, uv_python_list};
+use crate::uv_python::{UvPythonDiscovery, UvPythonError, UvPythonInfo, uv_python_list};
 use check_updates_core::Version;
 use std::path::PathBuf;
 use std::process::Command;
@@ -131,10 +131,31 @@ pub fn fetch_latest_python_versions(
         .parse_uv_python_list(stdout)
         .map_err(|e| e.to_string())?;
 
+    latest_from_listing(current, &all)
+}
+
+/// The decision half of [`fetch_latest_python_versions`], split out so the
+/// baseline rule is testable from a fixture without running `uv`.
+fn latest_from_listing(
+    current: &Version,
+    all: &[UvPythonInfo],
+) -> Result<(Option<Version>, Option<Version>), String> {
+    // Same guard global mode applies in `UvPythonDiscovery::checks_from_versions`.
+    // "Latest available" is only a fact if the listing contains builds that are
+    // not yet installed; `--only-installed`, `UV_PYTHON_DOWNLOADS=never` and
+    // `--offline` all suppress those rows, and then the maximum over the listing
+    // is just the installed interpreter reported back as the latest - a false
+    // negative that no failure count would ever show. The two code paths in this
+    // tool answer the same question, so they answer it the same way: say the
+    // latest is unknown rather than assert something we did not determine.
+    if !all.iter().any(|v| !v.is_installed) {
+        return Err(UvPythonError::NoDownloadBaseline.to_string());
+    }
+
     let current_series = format!("{}.{}", current.major, current.minor);
     let mut in_series: Option<Version> = None;
     let mut overall: Option<Version> = None;
-    for info in &all {
+    for info in all {
         let series = format!("{}.{}", info.version.major, info.version.minor);
         if series == current_series && in_series.as_ref().is_none_or(|b| info.version > *b) {
             in_series = Some(info.version.clone());
@@ -209,6 +230,33 @@ mod tests {
 
         let newest = info("3.14.1", Some("3.14.1"), Some("3.14.1"));
         assert!(!newest.newer_series_available());
+    }
+
+    fn listing(output: &str) -> Vec<UvPythonInfo> {
+        UvPythonDiscovery::new()
+            .parse_uv_python_list(output)
+            .unwrap()
+    }
+
+    // The false negative global mode already refuses: with no download-available
+    // rows the maximum over the listing is the installed interpreter itself, so
+    // reporting it as "latest" would assert something the listing did not say.
+    #[test]
+    fn listing_without_download_rows_is_unknown_not_up_to_date() {
+        let all = listing("cpython-3.12.2-linux-x86_64-gnu    /usr/bin/python3.12\n");
+        let err = latest_from_listing(&Version::from_str("3.12.2").unwrap(), &all).unwrap_err();
+        assert!(err.contains("no download-available rows"));
+    }
+
+    #[test]
+    fn download_rows_give_both_in_series_and_overall_latest() {
+        let all = listing(
+            "cpython-3.12.2-linux-x86_64-gnu    /usr/bin/python3.12\ncpython-3.12.12-linux-x86_64-gnu    <download available>\ncpython-3.14.1-linux-x86_64-gnu    <download available>\n",
+        );
+        let (in_series, overall) =
+            latest_from_listing(&Version::from_str("3.12.2").unwrap(), &all).unwrap();
+        assert_eq!(in_series.unwrap().to_string(), "3.12.12");
+        assert_eq!(overall.unwrap().to_string(), "3.14.1");
     }
 
     #[test]

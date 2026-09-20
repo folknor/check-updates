@@ -32,7 +32,7 @@ pub struct Args {
     #[arg(short, long)]
     pub pre_release: bool,
 
-    /// Emit results as JSON on stdout (status messages go to stderr)
+    /// Emit results as JSON on stdout (human-readable output is suppressed; warnings go to stderr)
     #[arg(long)]
     pub json: bool,
 }

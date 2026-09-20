@@ -23,7 +23,7 @@ Run `ncu` in a Node.js project directory to see outdated dependencies. Supports 
 | `-m` | Include minor updates (use with `-u` as `-um`) |
 | `-f` | Force update all to absolute latest (use with `-u` as `-uf`) |
 | `-p` | Include pre-release versions |
-| `--json` | Emit machine-readable JSON on stdout (status messages go to stderr) |
+| `--json` | Emit machine-readable JSON on stdout (human-readable output is suppressed; warnings go to stderr) |
 
 ### Example
 
@@ -55,8 +55,10 @@ Schema: `{ schema_version, tool, mode, checks[], errors[] }`.
 
 ## Supported files
 
-- `package.json` (root + workspace members)
-- Lock files: `package-lock.json` (npm), `pnpm-lock.yaml`, `yarn.lock`, `bun.lockb`
+- `package.json` (root + workspace members; `node_modules` is skipped when expanding workspace globs)
+- Lock files: `package-lock.json` (npm), `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`
+
+Bun's text `bun.lock` is read for installed versions and is preferred when both bun lock files are present. The older binary `bun.lockb` is detected but cannot be read: ncu warns on stderr that the installed column is the ranges' base versions rather than what is installed, and suggests `bun install --save-text-lockfile`.
 
 ## Related
 

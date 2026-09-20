@@ -1,5 +1,5 @@
 use anyhow::Result;
-use check_updates_core::{UpdateSeverity, Version};
+use check_updates_core::{DependencyResolver, UpdateSeverity, Version};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -51,22 +51,22 @@ pub struct GlobalCheck {
 
 impl GlobalCheck {
     /// Get update severity for coloring
+    ///
+    /// Delegates to [`DependencyResolver::calculate_severity`], which holds the
+    /// one definition of this classification. The copy that used to live here
+    /// compared major, minor and patch independently, so every move that is
+    /// newer without changing the triple - leaving a pre-release, gaining a
+    /// post-release, a fourth release segment, a local segment - came back
+    /// `None` on a row whose `has_update` was already `true`, printing a blank
+    /// severity column for a real update.
     pub fn update_severity(&self) -> Option<UpdateSeverity> {
         if !self.has_update || self.check_failed {
             return None;
         }
-        let current = &self.package.installed_version;
-        let target = &self.latest;
-
-        if target.major > current.major {
-            Some(UpdateSeverity::Major)
-        } else if target.minor > current.minor {
-            Some(UpdateSeverity::Minor)
-        } else if target.patch > current.patch {
-            Some(UpdateSeverity::Patch)
-        } else {
-            None
-        }
+        DependencyResolver::calculate_severity(
+            Some(&self.package.installed_version),
+            Some(&self.latest),
+        )
     }
 }
 
@@ -114,15 +114,22 @@ fn failed_exit(tool: &str, output: &std::process::Output) -> SourceOutcome {
 }
 
 /// Discovers globally installed packages from various sources
-pub struct GlobalPackageDiscovery {
-    _include_prerelease: bool,
-}
+pub struct GlobalPackageDiscovery {}
 
 impl GlobalPackageDiscovery {
+    /// `include_prerelease` is accepted and deliberately unused.
+    ///
+    /// Discovery reports what is installed; an installed pre-release is an
+    /// installed package either way, so there is nothing here for the flag to
+    /// filter. `--pre-release` acts where the question is "what could this move
+    /// to" - the PyPI client, which global mode constructs with the same flag.
+    /// It used to be stored in an `_include_prerelease` field that nothing ever
+    /// read, which looked like an unimplemented filter rather than an absent
+    /// one. The parameter stays so the call site keeps reading as "this flag was
+    /// considered here".
     pub fn new(include_prerelease: bool) -> Self {
-        Self {
-            _include_prerelease: include_prerelease,
-        }
+        let _ = include_prerelease;
+        Self {}
     }
 
     /// Discover all globally installed packages
@@ -676,6 +683,37 @@ ty v0.0.5
             check_failed: false,
         };
         assert_eq!(check.update_severity(), None);
+    }
+
+    // A move that is newer without changing major/minor/patch is still an
+    // update, and a row whose `has_update` is true must never print a blank
+    // severity. The independent-field comparison returned `None` for all four.
+    #[test]
+    fn updates_that_do_not_change_the_triple_are_classified() {
+        let severity = |installed: &str, latest: &str| {
+            GlobalCheck {
+                package: GlobalPackage {
+                    name: "test".to_string(),
+                    installed_version: Version::from_str(installed).unwrap(),
+                    source: GlobalSource::Uv,
+                    python_version: None,
+                },
+                latest: Version::from_str(latest).unwrap(),
+                has_update: true,
+                check_failed: false,
+            }
+            .update_severity()
+        };
+
+        assert_eq!(severity("1.2.0-rc1", "1.2.0"), Some(UpdateSeverity::Patch));
+        assert_eq!(
+            severity("1.2.0", "1.2.0.post1"),
+            Some(UpdateSeverity::Patch)
+        );
+        assert_eq!(severity("1.2.3", "1.2.3.4"), Some(UpdateSeverity::Patch));
+        assert_eq!(severity("2024.1", "1!0.1"), Some(UpdateSeverity::Major));
+        // Lower minor, higher patch is not an update at all.
+        assert_eq!(severity("1.2.3", "1.1.9"), None);
     }
 
     #[test]

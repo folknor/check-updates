@@ -60,6 +60,27 @@ fn print_fetch_failures(failures: &[FetchError]) {
     }
 }
 
+/// Under `--update --force` the writer uses `force_spec`, which `resolve`
+/// computes from `latest` - not from `target`, which is capped by the declared
+/// range. The table printed `target` regardless, so `-uf` reported a smaller
+/// bump than it went on to write, and derived the severity column from that
+/// smaller bump too.
+///
+/// `-f` is documented as "force update all to absolute latest", so the write is
+/// right and the row was wrong. This retargets the row onto `latest` and
+/// recomputes the severity from the same pair, for display only: `force_spec`
+/// is untouched, so `will_update` and `update_blocker` answer exactly as before
+/// and `apply_updates` still sees the original checks.
+fn retarget_forced(check: &DependencyCheck) -> DependencyCheck {
+    let mut forced = check.clone();
+    forced.severity =
+        DependencyResolver::calculate_severity(check.current_version(), Some(&check.latest));
+    forced.target = Some(check.latest.clone());
+    forced.target_spec = check.force_spec.clone();
+    forced.target_released_at = check.latest_released_at.clone();
+    forced
+}
+
 fn emit_json_project(checks: &[DependencyCheck], errors: &[FetchError]) -> Result<()> {
     let report = serde_json::json!({
         "schema_version": SCHEMA_VERSION,
@@ -328,8 +349,16 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     // Dependencies are tracked per declaration site, so the same package declared in two
     // workspace members produces two checks. Collapse rows that agree on name and target
     // (matching ccu), so only genuinely different ranges show up as separate rows.
+    //
+    // Under `-uf` the rows are retargeted onto `latest` first, because that is
+    // what `apply_updates` will write. The retargeting is a display copy; the
+    // write below still goes through `checks`.
+    let forced_display: Option<Vec<DependencyCheck>> =
+        (args.update && args.force).then(|| checks.iter().map(retarget_forced).collect());
+    let display_checks: &[DependencyCheck] = forced_display.as_deref().unwrap_or(&checks);
+
     let mut seen_rows: HashSet<String> = HashSet::new();
-    let to_render: Vec<&DependencyCheck> = checks
+    let to_render: Vec<&DependencyCheck> = display_checks
         .iter()
         .filter(|c| c.has_update() && (!args.update || c.will_update(args.minor, args.force)))
         .filter(|c| {

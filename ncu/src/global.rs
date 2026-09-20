@@ -1,5 +1,5 @@
 use anyhow::Result;
-use check_updates_core::{UpdateSeverity, Version};
+use check_updates_core::{DependencyResolver, UpdateSeverity, Version};
 use serde::Serialize;
 use std::process::Command;
 use std::str::FromStr;
@@ -36,23 +36,22 @@ pub struct GlobalCheck {
 }
 
 impl GlobalCheck {
-    /// Get update severity for coloring
+    /// Get update severity for coloring.
+    ///
+    /// Delegates to [`DependencyResolver::calculate_severity`], which holds the one
+    /// correct definition. Comparing major, minor and patch independently - as this
+    /// used to - returns `None` for any move that is newer without changing the
+    /// triple (a prerelease becoming a release, for instance), so a row with
+    /// `has_update == true` would print a blank severity: the struct says there is an
+    /// update and the severity says there is not.
     pub fn update_severity(&self) -> Option<UpdateSeverity> {
         if !self.has_update {
             return None;
         }
-        let current = &self.package.installed_version;
-        let target = &self.latest;
-
-        if target.major > current.major {
-            Some(UpdateSeverity::Major)
-        } else if target.minor > current.minor {
-            Some(UpdateSeverity::Minor)
-        } else if target.patch > current.patch {
-            Some(UpdateSeverity::Patch)
-        } else {
-            None
-        }
+        DependencyResolver::calculate_severity(
+            Some(&self.package.installed_version),
+            Some(&self.latest),
+        )
     }
 }
 
@@ -208,6 +207,30 @@ mod tests {
             has_update: false,
         };
         assert_eq!(check.update_severity(), None);
+    }
+
+    // A move that is newer without changing the triple is still an update. The
+    // hand-rolled field-by-field comparison classified it `None`, so the row
+    // claimed an update and printed a blank severity.
+    #[test]
+    fn an_update_that_does_not_change_the_triple_still_has_a_severity() {
+        let severity = |from: &str, to: &str| {
+            GlobalCheck {
+                package: GlobalPackage {
+                    name: "test".to_string(),
+                    installed_version: Version::from_str(from).expect("valid version"),
+                    source: GlobalSource::Npm,
+                },
+                latest: Version::from_str(to).expect("valid version"),
+                has_update: true,
+            }
+            .update_severity()
+        };
+
+        assert_eq!(severity("1.2.0-rc1", "1.2.0"), Some(UpdateSeverity::Patch));
+        assert_eq!(severity("1.2.3", "1.2.3.4"), Some(UpdateSeverity::Patch));
+        // A lower minor with a higher patch is not an update at all.
+        assert_eq!(severity("1.2.3", "1.1.5"), None);
     }
 
     #[test]

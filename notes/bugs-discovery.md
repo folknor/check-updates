@@ -1,12 +1,5 @@
 # Discovery and parsing defects (DSC)
 
-0. Not every entry here is a bug. These documents were produced by automated
-   hunters and mix genuine defects with opinions about how the tools ought to
-   behave. Before acting on an entry, apply the test in
-   `reference/resolution-principles.md`: a bug is the code contradicting
-   something stated - its own doc comment, a README, the CLI help, a spec it
-   claims to implement, or itself. A preference about semantics is a feature
-   request; leave the behaviour alone and say so.
 1. An entry is removed entirely when completely resolved. No historical record
    stays here.
 2. Stable IDs never change and are never reused; removal leaves a gap.
@@ -41,41 +34,6 @@ and rewriting `expand_workspace_pattern` as an `ignore::WalkBuilder` walk
 matched against a compiled `glob::Pattern`. That subsumes the hand-rolled list.
 Promoting `ignore` to `[workspace.dependencies]` at the same time is worth
 considering, since pcu will want it.
-
-## DSC-019 - ncu's workspace globs accept patterns escaping the project root
-
-Lateral finding from the DSC-002 work.
-
-npm rejects a workspace pattern that resolves outside the project root. ncu does
-not check, so `"workspaces": ["../../*"]` is happily detected and, under `-u`,
-rewrites manifests outside the tree the user pointed at.
-
-`expand_workspace_pattern` also builds its glob from
-`self.project_path.join(pattern).to_string_lossy()`, so a *project path*
-containing `*`, `?` or `[` is silently reinterpreted as a pattern. That is the
-same defect as DSC-003's third bullet, which is filed against ccu only; ccu's
-half is fixed (the project-path prefix goes through `glob::Pattern::escape`),
-ncu's is not.
-
-## DSC-003 - closed, with one sub-point adjudicated against
-
-Reported by ccu. Two of three fixed in `ccu/src/detector.rs`: the project-path
-prefix now goes through `glob::Pattern::escape` so metacharacters in a path the
-user did not choose are literal (in `expand_workspace_member` and in
-`is_excluded`'s glob branch), and `is_excluded` uses a component-wise
-`strip_prefix` so `exclude = ["vendor"]` covers `vendor/foo` without `vendored`
-falsely matching.
-
-The gitignore sub-point was **refused, and should not be re-hunted.** b24f805's
-rationale is specific to auto-discovery, which *guesses* at membership and must
-not adopt unrelated vendored checkouts found by scanning. An explicit `members`
-entry is the opposite case: the user declaring what belongs. Cargo itself
-expands member globs with no ignore awareness, and a gitignored-but-listed
-member is a real member whose dependencies must be reported - filtering it would
-make ccu report a strict subset of what `cargo build` builds. The reasoning is a
-doc comment on `expand_workspace_member`.
-
-Kept only until the ncu half of the glob-injection bullet lands: see DSC-019.
 
 ## DSC-004 - pcu resolves conda dependencies against PyPI
 
@@ -206,54 +164,6 @@ ate the include directives.
 The precise rule not yet implemented: `.`->`-` and run collapsing, so that
 `zope.interface` and `foo--bar` produce keys matching registry and lock-file
 keys.
-
-## DSC-015 - binary `bun.lockb` still cannot be read
-
-Reported by ncu. Closed except for the binary format. Text `bun.lock` is parsed
-and wired through the detector; `bun.lockb` now warns on stderr naming the
-consequence and the remedy instead of returning an empty map silently.
-
-Residue is only the binary format itself, which is a real decoding job and may
-never be worth it now that bun emits text lock files on request. The honest
-warning may be the permanent answer.
-
-The ncu README's "(bun.lockb detection only)" is now wrong in the other
-direction and should be updated to say text `bun.lock` is read.
-
-## DSC-016 - ccu emits workspace-inherited deps once per inheriting member
-
-Reported by ccu.
-
-`CargoTomlParser::parse` reads `[workspace.dependencies]` from the root
-manifest, and each member's `.workspace = true` entry also produces a
-`Dependency` whose `source_file` points at the root. The display path dedupes
-via the `seen` HashSet in `main.rs`, but the JSON `checks` array does not - a
-`--json` consumer sees N near-identical entries for every shared dep. The
-updater also rewrites the same root line N times (harmless, but N file
-parses/writes of redundant work per run).
-
-## DSC-017 - closed, with the recursion sub-point adjudicated against
-
-Reported by pcu-parsers. Three of four fixed in `pcu/src/detector.rs`:
-`requirements*.txt` are `is_file`-filtered and sorted before being pushed, so
-table order and which-duplicate-wins are deterministic; `environment.y[a]ml`
-gained the same `is_file` check; and the failure policy is uniform - an
-unreadable pyproject and a failed `read_dir` both warn on stderr and continue,
-neither aborting the run.
-
-The recursion sub-point was **refused, and should not be re-hunted.** pcu
-resolves installed versions from a single project-root lock file and prints one
-set of sync commands per run. A nested `pyproject.toml` is a sibling
-distribution with its own lock and its own manager, so discovering it would
-merge unrelated dependency sets into one table and resolve them against the
-wrong lock. It would also need an exclusion policy (`.venv`, `site-packages`,
-`node_modules`, `.git`, build trees) and a depth bound, or a repo with a
-vendored virtualenv detects hundreds of files. The reasoning is a block comment
-above the detector tests.
-
-Documentation consequence still outstanding: the pcu README claims recursive
-discovery. It should be reconciled with top-level-only discovery, and ideally
-note the now-deterministic ordering.
 
 ## DSC-020 - `parse::<toml::Value>()` does not round-trip a manifest
 

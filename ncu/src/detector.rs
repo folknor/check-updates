@@ -126,10 +126,21 @@ impl ProjectDetector {
     /// still matched. Closing that gap needs `ignore = "0.4"` in `ncu/Cargo.toml` (ccu
     /// already depends on it), after which this should become a `WalkBuilder` walk whose
     /// results are matched against `glob::Pattern`.
+    ///
+    /// Only the workspace pattern itself is glob syntax. The project path was chosen by
+    /// the user's filesystem, not written into `package.json`, so a directory literally
+    /// named `a[b]` or `v*` must not be reinterpreted as a pattern; the prefix is
+    /// escaped before the member pattern is spliced onto it. Same rule as ccu's
+    /// `expand_workspace_member`.
     fn expand_workspace_pattern(&self, pattern: &str) -> Result<Vec<PathBuf>> {
         let mut results = Vec::new();
-        let full_pattern = self.project_path.join(pattern).join("package.json");
-        let pattern_str = full_pattern.to_string_lossy();
+        let pattern_str = format!(
+            "{}/{}",
+            Self::escape_glob_prefix(&self.project_path),
+            PathBuf::from(pattern)
+                .join("package.json")
+                .to_string_lossy()
+        );
 
         if let Ok(paths) = glob::glob(&pattern_str) {
             for entry in paths.flatten() {
@@ -141,6 +152,13 @@ impl ProjectDetector {
 
         results.sort();
         Ok(results)
+    }
+
+    /// Escape glob metacharacters in a path that is data, not pattern.
+    ///
+    /// `glob::Pattern::escape` wraps `*`, `?` and `[` in character classes.
+    fn escape_glob_prefix(path: &Path) -> String {
+        glob::Pattern::escape(&path.to_string_lossy())
     }
 
     /// Check if a lock file exists and return which type
@@ -310,6 +328,48 @@ mod tests {
 
         let detected = ProjectDetector::new(root.clone()).detect()?;
         assert_eq!(detected.len(), 2, "detected: {detected:?}");
+        Ok(())
+    }
+
+    // The project path is data, not pattern. A directory literally named `app[1]`
+    // used to be spliced raw into the glob, where `[1]` became a character class
+    // matching the single character `1` - so the directory never matched itself and
+    // every workspace member vanished.
+    #[test]
+    fn metacharacters_in_the_project_path_are_literal() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("app[1]");
+
+        write_package_json(&root, r#"{"name":"root","workspaces":["packages/*"]}"#)?;
+        write_package_json(&root.join("packages/a"), r#"{"name":"a"}"#)?;
+
+        let detected = ProjectDetector::new(root.clone()).detect()?;
+        assert_eq!(detected.len(), 2, "detected: {detected:?}");
+        Ok(())
+    }
+
+    // `*` and `?` in the project path are the same problem with a subtler symptom:
+    // they match, but they also match sibling directories the user never pointed at.
+    #[test]
+    fn a_star_in_the_project_path_does_not_match_siblings() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("v*");
+
+        write_package_json(&root, r#"{"name":"root","workspaces":["packages/*"]}"#)?;
+        write_package_json(&root.join("packages/a"), r#"{"name":"a"}"#)?;
+        // A sibling that an unescaped `v*` prefix would sweep in.
+        write_package_json(
+            &tmp.path().join("v2/packages/intruder"),
+            r#"{"name":"intruder"}"#,
+        )?;
+
+        let detected = ProjectDetector::new(root.clone()).detect()?;
+        let paths: Vec<_> = detected.iter().map(|d| d.path.clone()).collect();
+        assert_eq!(paths.len(), 2, "detected: {paths:?}");
+        assert!(
+            !paths.iter().any(|p| p.to_string_lossy().contains("v2")),
+            "detected: {paths:?}"
+        );
         Ok(())
     }
 }

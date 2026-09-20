@@ -1,6 +1,6 @@
 use crate::global::UpgradeCommand;
 use anyhow::Result;
-use check_updates_core::Version;
+use check_updates_core::{DependencyResolver, UpdateSeverity, Version};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -143,10 +143,18 @@ pub struct UvPythonCheck {
 
 impl UvPythonCheck {
     /// Get update severity for coloring (patch or minor)
+    ///
+    /// Asks [`DependencyResolver::calculate_severity`] rather than comparing
+    /// major and minor by hand: that is the one definition of the
+    /// classification, and it agrees with the `Ord` that decided `has_update`.
+    /// The hand-rolled version called any equal-major-minor move a patch even
+    /// when it was not an update at all, and had no answer for a move that is
+    /// newer without changing the triple.
     pub fn is_patch_update(&self) -> bool {
-        self.has_update
-            && self.latest_version.major == self.installed_version.major
-            && self.latest_version.minor == self.installed_version.minor
+        DependencyResolver::calculate_severity(
+            Some(&self.installed_version),
+            Some(&self.latest_version),
+        ) == Some(UpdateSeverity::Patch)
     }
 }
 
@@ -562,5 +570,30 @@ cpython-3.12.2-linux-x86_64-gnu     /usr/bin/python3.12
         };
 
         assert!(!check_no_update.is_patch_update());
+    }
+
+    // Severity now comes from the shared classifier, so a prerelease-to-release
+    // move inside one series is a patch, and a lower-minor target is not an
+    // update of any kind rather than a patch by accident of equal majors.
+    #[test]
+    fn patch_classification_matches_the_shared_definition() {
+        let check = |installed: &str, latest: &str| UvPythonCheck {
+            series: "3.11".to_string(),
+            installed_version: Version::from_str(installed).unwrap(),
+            latest_version: Version::from_str(latest).unwrap(),
+            has_update: Version::from_str(latest).unwrap() > Version::from_str(installed).unwrap(),
+            python_info: UvPythonInfo {
+                full_name: "cpython-x".to_string(),
+                version: Version::from_str(installed).unwrap(),
+                path: None,
+                is_installed: true,
+                is_uv_managed: true,
+                implementation: "cpython".to_string(),
+            },
+        };
+
+        assert!(check("3.11.0-rc1", "3.11.0").is_patch_update());
+        assert!(!check("3.11.14", "3.12.1").is_patch_update());
+        assert!(!check("3.11.14", "3.11.5").is_patch_update());
     }
 }

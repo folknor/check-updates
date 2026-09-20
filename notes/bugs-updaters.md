@@ -1,12 +1,5 @@
 # File-rewriting defects (UPD)
 
-0. Not every entry here is a bug. These documents were produced by automated
-   hunters and mix genuine defects with opinions about how the tools ought to
-   behave. Before acting on an entry, apply the test in
-   `reference/resolution-principles.md`: a bug is the code contradicting
-   something stated - its own doc comment, a README, the CLI help, a spec it
-   claims to implement, or itself. A preference about semantics is a feature
-   request; leave the behaviour alone and say so.
 1. An entry is removed entirely when completely resolved. No historical record
    stays here.
 2. Stable IDs never change and are never reused; removal leaves a gap.
@@ -32,23 +25,6 @@ indistinguishable from one that was never attempted. The hunters' proposal -
 `Written | Unchanged | NotFound | Skipped(reason)` per check, with both the
 table and the JSON envelope driven off that one value - is unimplemented and
 spans `main.rs` and `output.rs` in all three tools. Shares a fix with RPT-003.
-
-## UPD-006 - `pcu -uf` writes a different version than it reports
-
-Reported by pcu-runtime.
-
-`main.rs` builds the display set from `c.target` and `core/src/output.rs::print_row`
-prints `check.target`, but `apply_updates` under `force` writes
-`check.force_spec`, which `calculate_force_spec` computes from **`latest`**, not
-`target`. For any dependency whose constraint caps it below latest, `pcu -uf`
-prints `requests 2.28.0 -> 2.30.0 (2.32.3 available)` and then writes `2.32.3`.
-The severity column is computed from `target` too, so a major bump can display
-as minor.
-
-The hunter notes this is the same class as commit dc62172 ("Report only the
-updates that were actually applied"): the severity-filter half was fixed, the
-force-target half was not. The same `force_spec`-vs-`target` split exists in ccu
-and ncu, which the hunters did not separately test.
 
 ## UPD-007 - pcu's pyproject rewriting is still not TOML-aware
 

@@ -145,6 +145,28 @@ fn print_fetch_failures(failures: &[FetchError]) {
     }
 }
 
+/// Under `--update --force` the writer uses `force_spec`, which `resolve`
+/// computes from `latest` - not from `target`, which is capped by the declared
+/// constraint. The table printed `target` regardless, so `pcu -uf` reported
+/// `requests 2.28.0 -> 2.30.0 (2.32.3 available)` and then wrote 2.32.3, and
+/// derived the severity column from the smaller jump as well, so a major bump
+/// could display as minor.
+///
+/// `-f` is documented as "force update all to absolute latest", so the write is
+/// right and the row was wrong. This retargets the row onto `latest` and
+/// recomputes the severity from the same pair, for display only: `force_spec`
+/// is untouched, so `will_update` and `update_blocker` answer exactly as before
+/// and `apply_updates` still sees the original checks.
+fn retarget_forced(check: &DependencyCheck) -> DependencyCheck {
+    let mut forced = check.clone();
+    forced.severity =
+        DependencyResolver::calculate_severity(check.current_version(), Some(&check.latest));
+    forced.target = Some(check.latest.clone());
+    forced.target_spec = check.force_spec.clone();
+    forced.target_released_at = check.latest_released_at.clone();
+    forced
+}
+
 fn emit_json_project(
     checks: &[DependencyCheck],
     failures: &[FetchError],
@@ -599,9 +621,17 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         }
     }
 
-    // 5. Deduplicate for display (same package with same target)
+    // 5. Deduplicate for display (same package with same target).
+    //
+    // Under `-uf` the rows are retargeted onto `latest` first, because that is
+    // what `apply_updates` will write. The retargeting is a display copy; every
+    // write below still goes through `checks`.
+    let forced_display: Option<Vec<DependencyCheck>> =
+        (args.update && args.force).then(|| checks.iter().map(retarget_forced).collect());
+    let display_checks: &[DependencyCheck] = forced_display.as_deref().unwrap_or(&checks);
+
     let mut seen: HashSet<String> = HashSet::new();
-    let deduplicated: Vec<&DependencyCheck> = checks
+    let deduplicated: Vec<&DependencyCheck> = display_checks
         .iter()
         .filter(|c| {
             if !c.has_update() {
@@ -757,6 +787,34 @@ mod tests {
             "/p/pyproject.toml",
             Some("dependencies")
         )));
+    }
+
+    /// `-uf` used to print the constraint-capped target and then write
+    /// `force_spec`, which is computed from `latest`.
+    #[test]
+    fn forced_rows_display_the_version_force_will_write() {
+        use check_updates_core::{UpdateSeverity, Version};
+
+        let mut check = DependencyCheck {
+            dependency: dep("requests", "/p/requirements.txt", None),
+            installed: Some(Version::new(2, 28, 0)),
+            in_range: Some(Version::new(2, 30, 0)),
+            latest: Version::new(3, 0, 0),
+            target: Some(Version::new(2, 30, 0)),
+            target_spec: Some(VersionSpec::Pinned(Version::new(2, 30, 0))),
+            severity: Some(UpdateSeverity::Minor),
+            force_spec: Some(VersionSpec::Pinned(Version::new(3, 0, 0))),
+            installed_released_at: None,
+            target_released_at: None,
+            latest_released_at: Some("2025-01-01".to_string()),
+        };
+        check.dependency.version_spec = VersionSpec::Pinned(Version::new(2, 28, 0));
+
+        let forced = retarget_forced(&check);
+        assert_eq!(forced.target, Some(Version::new(3, 0, 0)));
+        assert_eq!(forced.severity, Some(UpdateSeverity::Major));
+        assert!(!forced.has_newer_available());
+        assert!(forced.will_update(false, true));
     }
 
     #[test]

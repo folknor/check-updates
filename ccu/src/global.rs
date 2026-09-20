@@ -1,5 +1,5 @@
 use anyhow::Result;
-use check_updates_core::{UpdateSeverity, Version};
+use check_updates_core::{DependencyResolver, UpdateSeverity, Version};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -66,23 +66,23 @@ pub struct GlobalCheck {
 }
 
 impl GlobalCheck {
-    /// Get update severity for coloring (registry crates only)
+    /// Get update severity for coloring (registry crates only).
+    ///
+    /// Delegates to [`DependencyResolver::calculate_severity`] so global mode
+    /// classifies a move exactly the way project mode does. The comparison must
+    /// not be re-derived from the major/minor/patch fields here: a move that is
+    /// newer without changing the triple (leaving a pre-release, gaining a
+    /// post-release, a fourth release segment) would then return `None` while
+    /// `has_update` is `true`, and the row would claim an update with no
+    /// severity.
     pub fn update_severity(&self) -> Option<UpdateSeverity> {
         if !self.has_update || self.check_failed {
             return None;
         }
-        let latest = self.latest_version.as_ref()?;
-        let current = &self.package.installed_version;
-
-        if latest.major > current.major {
-            Some(UpdateSeverity::Major)
-        } else if latest.minor > current.minor {
-            Some(UpdateSeverity::Minor)
-        } else if latest.patch > current.patch {
-            Some(UpdateSeverity::Patch)
-        } else {
-            None
-        }
+        DependencyResolver::calculate_severity(
+            Some(&self.package.installed_version),
+            self.latest_version.as_ref(),
+        )
     }
 }
 
@@ -383,6 +383,13 @@ async fn check_github_repo(
     let json: serde_json::Value = response.json().await.ok()?;
 
     let status = json.get("status")?.as_str()?;
+    // The compare is `base...head` = `installed_hash...HEAD`, so GitHub's
+    // `ahead_by` counts the commits HEAD has that the *installed* hash lacks.
+    // Named from the base's point of view that is exactly how far behind the
+    // installed version is, which is why it lands in `commits_behind`. The two
+    // names invert each other only because they are measured from opposite
+    // ends; `behind_by` here would be commits the installed hash has that
+    // upstream does not, which is not what we report.
     let ahead_by = json.get("ahead_by")?.as_u64()?;
 
     if status == "ahead" && ahead_by > 0 {
@@ -547,22 +554,26 @@ fn check_local_git_repo(path: &std::path::Path) -> Option<PathStatus> {
         .output()
         .ok();
 
-    let commits_behind = behind_output
-        .filter(|o| o.status.success())
-        .and_then(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .parse::<u64>()
-                .ok()
-        })
-        .unwrap_or(0);
+    // A failure here is not "zero commits behind". `rev-list HEAD..@{upstream}`
+    // exits non-zero when the branch has no upstream configured, and the count
+    // is stale-or-wrong when the preceding fetch could not reach the remote. In
+    // either case we did not determine the distance, so the row is `unknown`
+    // and the dirty/HEAD facts we *did* establish are kept.
+    let commits_behind = behind_output.filter(|o| o.status.success()).and_then(|o| {
+        String::from_utf8_lossy(&o.stdout)
+            .trim()
+            .parse::<u64>()
+            .ok()
+    });
+
+    let unknown = commits_behind.is_none();
 
     Some(PathStatus {
         head_hash,
-        commits_behind,
+        commits_behind: commits_behind.unwrap_or(0),
         has_dirty_changes,
         remote_url,
-        unknown: false,
+        unknown,
     })
 }
 

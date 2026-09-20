@@ -1,12 +1,5 @@
 # Reporting, registry and global-mode defects (RPT)
 
-0. Not every entry here is a bug. These documents were produced by automated
-   hunters and mix genuine defects with opinions about how the tools ought to
-   behave. Before acting on an entry, apply the test in
-   `reference/resolution-principles.md`: a bug is the code contradicting
-   something stated - its own doc comment, a README, the CLI help, a spec it
-   claims to implement, or itself. A preference about semantics is a feature
-   request; leave the behaviour alone and say so.
 1. An entry is removed entirely when completely resolved. No historical record
    stays here.
 2. Stable IDs never change and are never reused; removal leaves a gap.
@@ -63,51 +56,6 @@ Related, from ncu: in `--json` project mode `checks` contains *every* resolved
 dependency including up-to-date ones, while the human path filters to updates.
 Neither behavior is documented in the READMEs.
 
-## RPT-005 - An unknown git-install check is not surfaced to the user
-
-Reported by ccu. Narrowed: the lying half is fixed in `ccu/src/global.rs`.
-`parse_github_url` now accepts only github.com forms, `GitStatus` and
-`PathStatus` carry `unknown`, every git- and path-sourced package gets an entry
-inserted whatever happens, and `GlobalCheck::check_failed` suppresses the
-severity. A non-GitHub remote, a transport failure, a 404 and a 403/429 rate
-limit all now resolve to "unknown" rather than "up to date".
-
-`ccu/src/output.rs::render_commits_group` now renders those rows as
-`could not check` instead of filtering them out, so the state reaches the user.
-
-Two pieces of residue:
-
-- Path installs have the same defect one layer down. `check_local_git_repo`
-  treats a failing `git rev-list HEAD..@{upstream}` - no upstream configured, or
-  an offline fetch - as `commits_behind: 0, unknown: false`, i.e. current. Only
-  a `rev-parse HEAD` failure is marked unknown.
-- The GitHub compare API is still called unauthenticated - 60 requests/hour
-  shared per IP - so a user with more than a handful of git installs now gets
-  a table full of honest "unknown" instead of a table full of wrong "up to
-  date". Reading `GITHUB_TOKEN` / `GH_TOKEN` would make the feature usable.
-
-## RPT-008 - The `--json` help text promises stderr routing that does not exist
-
-Reported by ccu, pcu-runtime, ncu.
-
-`cli.rs` and the READMEs say "status messages go to stderr". Nothing in any of
-the three tools ever writes to stderr; every status line is `println!`,
-suppressed individually by `!args.json` guards. It happens to hold only because
-each line is guarded, and one un-guarded `println!` corrupts the JSON stream.
-(The indicatif bar does go to stderr on its own, which is the only part that
-matches.)
-
-## RPT-009 - `ccu/README.md` documents the wrong shape for the `-g` JSON
-
-Reported by ccu.
-
-The README says each check includes `source` and source-specific fields
-(`latest_version`, `git_url`, `git_hash`, ..., `local_path`) at the check level.
-In `main.rs`, `GlobalCheckJson` flattens a `GlobalCheck` whose
-`package: GlobalPackage` is a *nested* object, so `source`, `git_url`,
-`git_hash`, `local_path` and `binaries` live under `.package.*`. A `jq` filter
-written from the README fails.
-
 ## RPT-024 - `uv python list` has a JSON output mode
 
 Lateral finding from the RPT-012 work, and it makes that entry's whole class of
@@ -121,18 +69,6 @@ as a fallback for older uv, would remove the category.
 
 Not done in the wave that found it, because learning the schema would have meant
 running uv repeatedly against the real machine.
-
-## RPT-026 - pcu project mode has the false-negative that global mode fixed
-
-`fetch_latest_python_versions` computes "latest in series" from every row in the
-`uv python list` output, including installed ones. A listing with no
-download-available rows - `--offline`, `UV_PYTHON_DOWNLOADS=never`, or a config
-setting - therefore reports the installed version as the latest, silently.
-
-Global mode closed exactly this hole with a `NoDownloadBaseline` error, on the
-reasoning that a baseline computed from installed rows alone is meaningless
-rather than merely incomplete. Project mode needs the same check. It is a false
-negative, not an error, which is why it will not show up in any failure count.
 
 ## RPT-027 - `FetchError` is triplicated across the three registry clients
 
@@ -164,28 +100,17 @@ Lateral finding, reported independently by four hunters in this wave.
 Cosmetic, but they appear in the output of every `brokkr check` and so add
 constant noise to every future wave's diagnostics.
 
-## RPT-018 - Dead fields and leftover scaffolding advertising behavior that does not exist
 
-Reported by ncu, pcu-runtime, core.
 
-- The ncu `first_group` scaffolding is removed. Judgement recorded at the site
-  for when a second global source arrives: multi-source globals (pnpm/yarn)
-  are a *discovery* feature first, the grouping is the trivial half, and ccu's
-  `GlobalTableRenderer::render` is the working three-source model to copy.
-- `pcu`'s `GlobalPackageDiscovery::_include_prerelease` is stored and never
-  read. `pcu -g -p` only affects the PyPI client.
-- `pypi.rs`'s `yanked` field carries `#[allow(dead_code)]` while being read, so
-  the annotation is stale and would hide a genuinely dead field later. (The
-  hunter judged the yanked *policy* - drop a release only when every file is
-  yanked - defensible.)
-- `core::VersionSpec::max_major()` was unused and inconsistent; it has since
-  been deleted, with the reasoning recorded at the site.
+1. An entry is removed entirely when completely resolved. No historical record
+   stays here.
+2. Stable IDs never change and are never reused; removal leaves a gap.
+3. An entry adjudicated against, verified incorrect, or whose outcome is that no
+   action is taken owes comments at the code sites it names - and, where the
+   claim touches a documented contract, the relevant `reference/` or `docs/`
+   page - before the entry is removed, so the finding is not hunted again.
+4. Once all findings are resolved, the file gets deleted.
 
-## RPT-021 - `GitStatus::commits_behind` is populated from `ahead_by`
-
-Lateral finding from the RPT-005 work.
-
-`ccu/src/global.rs::check_github_repo` reads `ahead_by` from the GitHub compare
-response - commits on HEAD that the installed hash lacks, which is the right
-number - and stores it in a field named `commits_behind`. The value is correct
-and the name inverts it. A comment or a rename, not a behavior change.
+Findings about what the tools tell the user and how they reach the network:
+registry clients, error surfacing, the `--json` envelope, progress reporting,
+global mode, and documentation that does not match the code.
