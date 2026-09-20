@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use check_updates_core::{DependencyCheck, DependencyResolver, UpdateSeverity, Version};
+use check_updates_core::{DependencyCheck, DependencyResolver, Version};
 use clap::Parser;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -154,34 +154,30 @@ async fn run_global_mode(args: &Args) -> Result<()> {
 
     // 3. Build check results
     let mut checks: Vec<GlobalCheck> = Vec::new();
-    let mut major_filtered = 0usize;
 
     for package in packages {
         if let Some(info) = package_infos.get(&package.name) {
-            // Global mode always targets the absolute latest release. The
-            // upgrade command we print (`npm install -g <name>`) has no way to
-            // aim at anything but latest, so retargeting the row to the newest
-            // same-major version, as `-m` used to do here, printed a version
-            // the printed command would not install. `-m` is the same severity
-            // filter it is in project mode and in pcu's global mode: it hides
-            // major rows, it does not change what a row is compared against.
-            // `-f` lifts the filter.
-            let has_update = info.latest > package.installed_version;
-            let check = GlobalCheck {
-                package,
-                latest: info.latest.clone(),
-                has_update,
+            // `-m` in global mode retargets the row to the newest release
+            // sharing the installed major. `-f` is documented as "force update
+            // all to absolute latest", so it takes precedence - previously
+            // `-m` was tested first and `-g -mf` silently ignored `-f`.
+            let target = if args.minor && !args.force {
+                info.versions
+                    .iter()
+                    .filter(|v| v.major == package.installed_version.major)
+                    .max()
+                    .cloned()
+                    .unwrap_or_else(|| package.installed_version.clone())
+            } else {
+                info.latest.clone()
             };
+            let has_update = target > package.installed_version;
 
-            let filtered_out = !args.force
-                && args.minor
-                && matches!(check.update_severity(), Some(UpdateSeverity::Major));
-            if filtered_out {
-                major_filtered += 1;
-                continue;
-            }
-
-            checks.push(check);
+            checks.push(GlobalCheck {
+                package,
+                latest: target,
+                has_update,
+            });
         }
     }
 
@@ -202,15 +198,6 @@ async fn run_global_mode(args: &Args) -> Result<()> {
         for cmd in &commands {
             println!("  $ {cmd}");
         }
-    }
-
-    if major_filtered > 0 {
-        println!();
-        println!(
-            "{major_filtered} major update(s) hidden by {}. Drop it or pass {} to see them.",
-            "-m".cyan(),
-            "-f".cyan()
-        );
     }
 
     // 6. Print errors

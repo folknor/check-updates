@@ -1,5 +1,12 @@
 # Version model defects (VER)
 
+0. Not every entry here is a bug. These documents were produced by automated
+   hunters and mix genuine defects with opinions about how the tools ought to
+   behave. Before acting on an entry, apply the test in
+   `reference/resolution-principles.md`: a bug is the code contradicting
+   something stated - its own doc comment, a README, the CLI help, a spec it
+   claims to implement, or itself. A preference about semantics is a feature
+   request; leave the behaviour alone and say so.
 1. An entry is removed entirely when completely resolved. No historical record
    stays here.
 2. Stable IDs never change and are never reused; removal leaves a gap.

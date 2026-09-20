@@ -1,5 +1,5 @@
 use anyhow::Result;
-use check_updates_core::{Dependency, DependencyCheck, DependencyResolver, UpdateSeverity};
+use check_updates_core::{Dependency, DependencyCheck, DependencyResolver};
 use clap::Parser;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -291,7 +291,6 @@ async fn run_global_mode(args: &Args) -> Result<()> {
 
     // 3. Build check results
     let mut checks: Vec<GlobalCheck> = Vec::new();
-    let mut major_filtered = 0usize;
 
     for package in packages {
         let Some(info) = package_infos.get(&package.name) else {
@@ -309,35 +308,28 @@ async fn run_global_mode(args: &Args) -> Result<()> {
             continue;
         };
 
-        // Global mode always targets the absolute latest release. Nothing is
-        // written to disk here, and the upgrade commands we print
-        // (`uv tool upgrade --all`, `pipx upgrade-all`) have no way to aim at
-        // anything but latest - so retargeting the row to the newest
-        // same-major version, as `-m` used to do, printed a version the
-        // printed command would not install. `-m` is now the same severity
-        // filter it is in project mode: it narrows *which rows are reported*,
-        // not what they are reported against. `-f` means "no filter", which is
-        // the default here, and is checked first so `-g -mf` is no longer
-        // silently swallowed by `-m`.
-        let target = info.latest.clone();
+        // `-m` in global mode retargets the row to the newest release sharing
+        // the installed major. `-f` is documented as "force update all to
+        // absolute latest", so it takes precedence - previously `-m` was
+        // tested first and `-g -mf` silently ignored `-f`.
+        let target = if args.minor && !args.force {
+            info.versions
+                .iter()
+                .filter(|v| v.major == package.installed_version.major)
+                .max()
+                .cloned()
+                .unwrap_or_else(|| package.installed_version.clone())
+        } else {
+            info.latest.clone()
+        };
         let has_update = target > package.installed_version;
 
-        let check = GlobalCheck {
+        checks.push(GlobalCheck {
             package,
             latest: target,
             has_update,
             check_failed: false,
-        };
-
-        let filtered_out = !args.force
-            && args.minor
-            && matches!(check.update_severity(), Some(UpdateSeverity::Major));
-        if filtered_out {
-            major_filtered += 1;
-            continue;
-        }
-
-        checks.push(check);
+        });
     }
 
     // 4. Display results (renderer shows "All packages up to date." per section if needed)
@@ -404,15 +396,6 @@ async fn run_global_mode(args: &Args) -> Result<()> {
                 unchecked.join(", ")
             )
             .dimmed()
-        );
-    }
-
-    if major_filtered > 0 {
-        println!();
-        println!(
-            "{major_filtered} major update(s) hidden by {}. Drop it or pass {} to see them.",
-            "-m".cyan(),
-            "-f".cyan()
         );
     }
 
