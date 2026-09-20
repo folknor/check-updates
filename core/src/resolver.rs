@@ -19,8 +19,7 @@ impl DependencyResolver {
         let latest = package_info.latest.clone();
 
         // Calculate "in range" - latest version that satisfies the constraint
-        let in_range =
-            self.calculate_in_range(&dependency.version_spec, &package_info.versions, installed);
+        let in_range = self.calculate_in_range(&dependency.version_spec, &package_info.versions);
 
         // Determine the target version for display
         let current = installed.or_else(|| dependency.version_spec.base_version());
@@ -135,34 +134,36 @@ impl DependencyResolver {
         }
     }
 
-    /// Calculate the latest version "in range" for the constraint
+    /// The latest available version that satisfies the constraint.
+    ///
+    /// There is exactly one definition of "in range" and it lives in
+    /// [`VersionSpec::satisfies`]. This function only takes the maximum of what
+    /// that predicate accepts.
+    ///
+    /// It used to add a second, undocumented rule on top: for `Minimum` and
+    /// `GreaterThan` - two of thirteen variants - it discarded every candidate
+    /// outside the major series of the base or installed version. That made
+    /// `DependencyCheck.in_range` something other than what `types.rs` documents
+    /// it to be, and made the field disagree with the predicate the same crate
+    /// exposes: `>=2.28.0` is satisfied by 3.1.0 by any reading of the spec, in
+    /// Cargo and in PEP 440 alike. A tool that reports otherwise is lying about
+    /// the user's own constraint.
+    ///
+    /// Caution about major versions belongs to the severity axis, not to this
+    /// one: a `>=` dependency whose in-range latest crosses a major boundary is
+    /// classified `Major`, and `will_update` refuses it in every mode but
+    /// `--force`. The behaviour that changes is that `-u`/`-um` no longer raise
+    /// the floor of an unbounded spec to the newest same-major release; raising
+    /// a floor was never required by the constraint, and doing it silently hid
+    /// the real (major) update behind a minor-looking one.
     fn calculate_in_range(
         &self,
         spec: &VersionSpec,
         available_versions: &[Version],
-        installed: Option<&Version>,
     ) -> Option<Version> {
         available_versions
             .iter()
-            .filter(|v| {
-                // Must satisfy the spec
-                if !spec.satisfies(v) {
-                    return false;
-                }
-
-                // For unbounded specs (Minimum, GreaterThan), limit to same major
-                match spec {
-                    VersionSpec::Minimum(base) | VersionSpec::GreaterThan(base) => {
-                        let target_major = if let Some(inst) = installed {
-                            base.major.max(inst.major)
-                        } else {
-                            base.major
-                        };
-                        v.major == target_major
-                    }
-                    _ => true,
-                }
-            })
+            .filter(|v| spec.satisfies(v))
             .max()
             .cloned()
     }
@@ -244,6 +245,42 @@ mod tests {
 
         // No newer available (target IS the latest)
         assert!(!result.has_newer_available());
+    }
+
+    // A wildcard dependency with no lock entry still has a current version to
+    // compare against, so it gets a target, a severity and a rewritable spec
+    // instead of silently never updating.
+    #[test]
+    fn wildcard_without_a_lockfile_still_resolves() {
+        let resolver = DependencyResolver::new();
+        let dep = create_test_dependency("numpy", "==1.24.*");
+        let pkg_info = create_package_info("numpy", &["1.24.0", "1.24.4", "1.26.0"]);
+
+        let result = resolver.resolve(&dep, &pkg_info, None);
+
+        assert_eq!(result.in_range.as_ref().unwrap().to_string(), "1.24.4");
+        assert_eq!(result.target.as_ref().unwrap().to_string(), "1.24.4");
+        assert_eq!(result.severity, Some(UpdateSeverity::Patch));
+        assert_eq!(result.target_spec.as_ref().unwrap().to_string(), "==1.24.*");
+        assert!(result.will_update(false, false));
+    }
+
+    // One definition of "in range": whatever `satisfies` accepts. An unbounded
+    // minimum is satisfied by the next major, and we say so - the major update
+    // is then withheld by severity, not by pretending it is out of range.
+    #[test]
+    fn unbounded_minimum_is_in_range_across_majors() {
+        let resolver = DependencyResolver::new();
+        let dep = create_test_dependency("requests", ">=2.28.0");
+        let pkg_info = create_package_info("requests", &["2.28.0", "2.32.3", "3.1.0"]);
+
+        let installed = Version::from_str("2.28.0").unwrap();
+        let result = resolver.resolve(&dep, &pkg_info, Some(&installed));
+
+        assert_eq!(result.in_range.as_ref().unwrap().to_string(), "3.1.0");
+        assert_eq!(result.severity, Some(UpdateSeverity::Major));
+        assert!(!result.will_update(true, false));
+        assert!(result.will_update(false, true));
     }
 
     #[test]

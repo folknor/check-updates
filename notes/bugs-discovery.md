@@ -127,27 +127,19 @@ in two distinct shapes:
 - A spec that parses to `Complex` (`1.x`, a hyphen range) is still resolved,
   still displayed as checkable with a computed target, and then silently not
   written. The user is shown an update that `-u` will never apply.
-- A spec that makes `VersionSpec::parse` return `Err` - npm's space-separated
-  AND (`>=1.2.3 <2.0.0`) and `||` unions - is worse: `parse_deps` does
-  `if let Ok(..)`, so the dependency vanishes from the report entirely. Before
-  the strict-parsing change, `>=1.2.3 <2.0.0` at least appeared, as a garbage
-  `Minimum(1.2.0)`.
+- npm's space-separated AND (`>=1.2.3 <2.0.0`) and `||` unions land in the same
+  `Complex` bucket. An earlier revision of this entry claimed they made
+  `VersionSpec::parse` return `Err` and vanish from the report; that was wrong.
+  `parse` cannot fail - it ends in `Ok(Complex(..))` - so they are displayed,
+  not dropped. See VER-018, which is the general form of that mistake.
 
-A real npm range parser is still the fix. Routing the `Err` path to `Complex`
-would at least convert a disappearance into a visible un-actionable row, but
-only the display change makes either honest.
+Since ncu now uses an allow-list of specifiers it understands, the protocol
+forms (`catalog:`, `patch:`, `workspace:`) are deliberately skipped rather than
+queried. What is left is the genuinely-npm-range-but-unmodellable case: still
+resolved, still displayed with a computed target, still never written.
 
-## DSC-009 - ncu queries `npm:` aliases under the wrong name, violating a documented contract
-
-Reported by ncu.
-
-`core/src/types.rs` states `Dependency::name` is "the upstream package name on
-the registry ... For renamed/aliased deps this is the real package, not the
-local key." `parsers/package_json.rs` skips `git`/`file:`/`link:`/`workspace:`/
-`://`/`github:` but not `npm:`. `"lodash4": "npm:lodash@^4.17.0"` is kept with
-`name = "lodash4"` and queried as such - either a 404 in the errors list or,
-worse, a real unrelated package. Also unhandled and sent to the registry: pnpm
-`catalog:`, yarn berry `patch:`/`portal:`/`exec:`.
+A real npm range parser is the fix. Until then the display needs to admit which
+rows `-u` cannot act on.
 
 ## DSC-013 - package-name normalization is not PEP 503, and cannot be fixed alone
 

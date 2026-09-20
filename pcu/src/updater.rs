@@ -1,6 +1,6 @@
 use crate::detector::PackageManager;
 use anyhow::{Context, Result};
-use check_updates_core::{DependencyCheck, UpdateSeverity};
+use check_updates_core::{DependencyCheck, UpdateSeverity, write_atomically};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -411,37 +411,6 @@ fn replace_spec_after_name(
     ))
 }
 
-/// Write `bytes` to `path` by way of a sibling temporary file and a rename, so
-/// an interrupted or failed write cannot leave a truncated manifest behind.
-/// The rename is same-directory, hence atomic on every supported platform.
-fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("manifest");
-    let tmp_path = dir.join(format!(".{file_name}.pcu-{}.tmp", std::process::id()));
-
-    let result = (|| -> Result<()> {
-        fs::write(&tmp_path, bytes)
-            .with_context(|| format!("Failed to write temporary file: {}", tmp_path.display()))?;
-
-        // Preserve the original file's permissions where we can read them.
-        if let Ok(meta) = fs::metadata(path) {
-            let _ = fs::set_permissions(&tmp_path, meta.permissions());
-        }
-
-        fs::rename(&tmp_path, path)
-            .with_context(|| format!("Failed to replace file: {}", path.display()))
-    })();
-
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp_path);
-    }
-
-    result
-}
-
 /// Detect package manager from file path
 fn detect_package_manager(path: &Path) -> Option<PackageManager> {
     let file_name = path.file_name()?.to_str()?;
@@ -794,8 +763,14 @@ mod tests {
         let tmp = tempfile::tempdir()?;
 
         let poetry = tmp.path().join("pyproject.toml");
-        fs::write(&poetry, "[tool.poetry.dependencies]\nrequests = \"^2.28\"\n")?;
-        assert_eq!(detect_package_manager(&poetry), Some(PackageManager::Poetry));
+        fs::write(
+            &poetry,
+            "[tool.poetry.dependencies]\nrequests = \"^2.28\"\n",
+        )?;
+        assert_eq!(
+            detect_package_manager(&poetry),
+            Some(PackageManager::Poetry)
+        );
 
         fs::write(&poetry, "[tool.pdm.dev-dependencies]\ntest = []\n")?;
         assert_eq!(detect_package_manager(&poetry), Some(PackageManager::Pdm));

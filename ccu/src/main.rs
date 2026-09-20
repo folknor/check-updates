@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ccu::cli::Args;
-use ccu::cratesio::CratesIoClient;
+use ccu::cratesio::{CratesIoClient, FetchError};
 use ccu::detector::ProjectDetector;
 use ccu::global::{
     GlobalCheck, GlobalPackageDiscovery, GlobalSource, check_git_updates, check_path_updates,
@@ -32,26 +32,91 @@ struct GlobalCheckJson<'a> {
     severity: Option<UpdateSeverity>,
 }
 
-fn errors_to_json(errors: &[String]) -> Vec<serde_json::Value> {
-    errors
+/// One JSON object per failed registry lookup. `kind` is the stable tag from
+/// `FetchErrorKind::as_str`, so a consumer can tell `not_found` from
+/// `rate_limited` without parsing `message`.
+fn errors_to_json(failures: &[FetchError]) -> Vec<serde_json::Value> {
+    failures
         .iter()
-        .map(|e| serde_json::json!({"message": e}))
+        .map(|f| {
+            serde_json::json!({
+                "package": f.package,
+                "kind": f.kind.as_str(),
+                "message": f.detail,
+            })
+        })
         .collect()
 }
 
-fn emit_json_project(checks: &[DependencyCheck], errors: &[String]) -> Result<()> {
+/// Print registry failures under a header that matches what actually happened.
+///
+/// Only a 404 means "not on crates.io". A rate limit, a timeout or an outage
+/// says nothing about whether the crate exists, and printing those under a
+/// "not found" header told the user their dependencies do not exist when
+/// the network was down.
+fn print_fetch_failures(failures: &[FetchError]) {
+    let (missing, unchecked): (Vec<&FetchError>, Vec<&FetchError>) =
+        failures.iter().partition(|f| f.kind.is_missing());
+
+    if !missing.is_empty() {
+        println!("{}", "Crates not found on crates.io:".dimmed());
+        for failure in missing {
+            println!("  {}", failure.detail.dimmed());
+        }
+        println!();
+    }
+    if !unchecked.is_empty() {
+        println!("{}", "Crates that could not be checked:".dimmed());
+        for failure in unchecked {
+            println!("  {}", failure.detail.dimmed());
+        }
+        println!();
+    }
+}
+
+/// Dependencies we resolved from the manifests but could not check, because
+/// crates.io never answered for that name. They cannot appear in `checks` -
+/// a `DependencyCheck` requires a `latest` version we do not have - so they get
+/// their own machine-readable array. Without it a consumer cannot tell
+/// "up to date" from "we could not check": the free-text `errors` strings carry
+/// no structured package name.
+fn unchecked_to_json(unchecked: &[UncheckedDependency]) -> Vec<serde_json::Value> {
+    unchecked
+        .iter()
+        .map(|u| {
+            serde_json::json!({
+                "name": u.name,
+                "source_file": u.source_file,
+                "section": u.section,
+            })
+        })
+        .collect()
+}
+
+struct UncheckedDependency {
+    name: String,
+    source_file: std::path::PathBuf,
+    section: Option<String>,
+}
+
+fn emit_json_project(
+    checks: &[DependencyCheck],
+    errors: &[FetchError],
+    unchecked: &[UncheckedDependency],
+) -> Result<()> {
     let report = serde_json::json!({
         "schema_version": SCHEMA_VERSION,
         "tool": TOOL_NAME,
         "mode": "project",
         "checks": checks,
+        "unchecked": unchecked_to_json(unchecked),
         "errors": errors_to_json(errors),
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 
-fn emit_json_global(checks: &[GlobalCheck], errors: &[String]) -> Result<()> {
+fn emit_json_global(checks: &[GlobalCheck], errors: &[FetchError]) -> Result<()> {
     let with_severity: Vec<GlobalCheckJson<'_>> = checks
         .iter()
         .map(|c| GlobalCheckJson {
@@ -158,7 +223,7 @@ async fn run_global_mode(args: &Args) -> Result<()> {
 
     let cratesio_result = cratesio_result?;
     let package_infos = cratesio_result.packages;
-    let fetch_errors = cratesio_result.errors;
+    let fetch_failures = cratesio_result.failures;
 
     // 3. Build checks
     let mut checks: Vec<GlobalCheck> = Vec::new();
@@ -177,6 +242,20 @@ async fn run_global_mode(args: &Args) -> Result<()> {
                         has_update,
                         // crates.io answered for this name, so the comparison is real.
                         check_failed: false,
+                    });
+                } else {
+                    // crates.io never answered. The git and path arms below
+                    // already keep a `check_failed` row for this case; a
+                    // registry crate used to vanish from the table and the
+                    // JSON `checks` array instead, which reads as "fine".
+                    checks.push(GlobalCheck {
+                        package: pkg.clone(),
+                        latest_version: None,
+                        latest_hash: None,
+                        commits_behind: None,
+                        has_dirty_changes: false,
+                        has_update: false,
+                        check_failed: true,
                     });
                 }
             }
@@ -236,7 +315,7 @@ async fn run_global_mode(args: &Args) -> Result<()> {
 
     // 4. Render results
     if args.json {
-        emit_json_global(&checks, &fetch_errors)?;
+        emit_json_global(&checks, &fetch_failures)?;
         return Ok(());
     }
 
@@ -250,6 +329,12 @@ async fn run_global_mode(args: &Args) -> Result<()> {
         for cmd in &commands {
             println!("  $ {cmd}");
         }
+    }
+
+    // 6. Registry failures last, so they are not lost above the table
+    if !fetch_failures.is_empty() {
+        println!();
+        print_fetch_failures(&fetch_failures);
     }
 
     Ok(())
@@ -273,7 +358,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     if detected_files.is_empty() {
         if args.json {
-            emit_json_project(&[], &[])?;
+            emit_json_project(&[], &[], &[])?;
         } else {
             println!("No Cargo.toml found in {project_path:?}");
         }
@@ -306,7 +391,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     if all_dependencies.is_empty() {
         if args.json {
-            emit_json_project(&[], &[])?;
+            emit_json_project(&[], &[], &[])?;
         } else {
             println!("No dependencies found in Cargo.toml");
         }
@@ -351,21 +436,20 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         .await?;
 
     let package_infos = cratesio_result.packages;
-    let fetch_errors = cratesio_result.errors;
+    let fetch_failures = cratesio_result.failures;
     progress_bar.finish_and_clear();
 
-    // Print fetch errors if any (suppress in JSON mode; included in payload below)
-    if !fetch_errors.is_empty() && !args.json {
-        println!("{}", "Crates not found on crates.io:".dimmed());
-        for error in &fetch_errors {
-            println!("  {}", error.dimmed());
-        }
-        println!();
+    // Print fetch failures if any (suppress in JSON mode; included in payload below)
+    if !args.json {
+        print_fetch_failures(&fetch_failures);
     }
 
     // 4. Resolve updates
     let resolver = DependencyResolver::new();
     let mut checks: Vec<DependencyCheck> = Vec::new();
+    // Dependencies crates.io never answered for. Kept rather than dropped, so
+    // "we could not check this" is distinguishable from "it is up to date".
+    let mut unchecked: Vec<UncheckedDependency> = Vec::new();
 
     for dependency in &all_dependencies {
         if let Some(package_info) = package_infos.get(&dependency.name) {
@@ -386,6 +470,15 @@ async fn run_project_mode(args: &Args) -> Result<()> {
                 });
             let check = resolver.resolve(dependency, package_info, installed);
             checks.push(check);
+        } else if !unchecked.iter().any(|u| u.name == dependency.name) {
+            // The fetch is per crate name, so one entry per name is the whole
+            // story; a workspace-inherited dep would otherwise repeat once per
+            // inheriting member.
+            unchecked.push(UncheckedDependency {
+                name: dependency.name.clone(),
+                source_file: dependency.source_file.clone(),
+                section: dependency.section.clone(),
+            });
         }
     }
 
@@ -418,9 +511,10 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     if args.json {
         if args.update {
             let updater = FileUpdater::new();
-            let _ = updater.apply_updates(&checks, args.minor, args.force)?;
+            let result = updater.apply_updates(&checks, args.minor, args.force)?;
+            result.print_not_applied();
         }
-        emit_json_project(&checks, &fetch_errors)?;
+        emit_json_project(&checks, &fetch_failures, &unchecked)?;
         return Ok(());
     }
 
@@ -431,6 +525,18 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         .map(|c| c.dependency.name.as_str())
         .collect();
     let skipped = skipped.len();
+
+    // 7. If --update, apply updates based on severity filter.
+    //
+    // The write happens *before* the table is rendered: printing
+    // "Dependencies updated:" and then failing to write claims a success the
+    // process is about to contradict with an error.
+    let update_result = if args.update {
+        let updater = FileUpdater::new();
+        Some(updater.apply_updates(&checks, args.minor, args.force)?)
+    } else {
+        None
+    };
 
     let renderer = TableRenderer::new(true);
     if args.update && deduplicated.is_empty() {
@@ -444,10 +550,8 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         renderer.render_deduped(&deduplicated, header);
     }
 
-    // 7. If --update, apply updates based on severity filter
-    if args.update {
-        let updater = FileUpdater::new();
-        let result = updater.apply_updates(&checks, args.minor, args.force)?;
+    if let Some(result) = update_result {
+        result.print_not_applied();
 
         println!();
         if !result.modified_files.is_empty() {

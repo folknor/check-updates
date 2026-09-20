@@ -42,12 +42,17 @@ pub struct GlobalCheck {
     pub package: GlobalPackage,
     pub latest: Version,
     pub has_update: bool,
+    /// True when the registry lookup for this package failed, so `latest` is a
+    /// placeholder (the installed version) rather than a fact. Consumers of the
+    /// `--json` envelope must not read `has_update: false` on such a row as
+    /// "up to date"; they must check this flag first.
+    pub check_failed: bool,
 }
 
 impl GlobalCheck {
     /// Get update severity for coloring
     pub fn update_severity(&self) -> Option<UpdateSeverity> {
-        if !self.has_update {
+        if !self.has_update || self.check_failed {
             return None;
         }
         let current = &self.package.installed_version;
@@ -65,6 +70,49 @@ impl GlobalCheck {
     }
 }
 
+/// What a single discovery source produced
+///
+/// `Absent` is the one outcome that is not a problem: the tool is simply not
+/// installed on this machine. Every other failure is an error, because a broken
+/// or hung `uv` must not look identical to a clean machine.
+enum SourceOutcome {
+    Found(Vec<GlobalPackage>),
+    Absent,
+    Failed(String),
+}
+
+/// Everything discovery learned, including what it could not learn
+#[derive(Debug, Default)]
+pub struct DiscoveryOutcome {
+    pub packages: Vec<GlobalPackage>,
+    /// Human-readable descriptions of sources that could not be probed. These
+    /// are surfaced in the `--json` `errors` array and printed on the human
+    /// path; an empty vector really does mean "every source answered".
+    pub errors: Vec<String>,
+}
+
+/// Describe a failed `Command::output()` spawn, separating "not installed"
+/// from "installed but unusable".
+fn classify_spawn_error(tool: &str, err: &std::io::Error) -> SourceOutcome {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        SourceOutcome::Absent
+    } else {
+        SourceOutcome::Failed(format!("{tool}: could not run ({err})"))
+    }
+}
+
+/// Describe a non-zero exit, including whatever the tool said on stderr.
+fn failed_exit(tool: &str, output: &std::process::Output) -> SourceOutcome {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = stderr.trim();
+    let detail = if detail.is_empty() {
+        "no stderr output".to_string()
+    } else {
+        detail.lines().take(3).collect::<Vec<_>>().join("; ")
+    };
+    SourceOutcome::Failed(format!("{tool}: exited with {} ({detail})", output.status))
+}
+
 /// Discovers globally installed packages from various sources
 pub struct GlobalPackageDiscovery {
     _include_prerelease: bool,
@@ -78,26 +126,41 @@ impl GlobalPackageDiscovery {
     }
 
     /// Discover all globally installed packages
-    pub fn discover(&self) -> Vec<GlobalPackage> {
-        let mut packages = Vec::new();
+    ///
+    /// Each source contributes either packages or an error string; a source
+    /// that is not installed contributes neither.
+    pub fn discover(&self) -> DiscoveryOutcome {
+        let mut outcome = DiscoveryOutcome::default();
 
-        // Try each source, silently skip if not available
-        packages.extend(self.discover_uv_tools().unwrap_or_default());
-        packages.extend(self.discover_pipx_packages().unwrap_or_default());
-        packages.extend(self.discover_pip_user_packages().unwrap_or_default());
+        let mut absorb = |source: SourceOutcome| match source {
+            SourceOutcome::Found(packages) => outcome.packages.extend(packages),
+            SourceOutcome::Absent => {}
+            SourceOutcome::Failed(message) => outcome.errors.push(message),
+        };
 
-        packages
+        absorb(self.discover_uv_tools());
+        for source in self.discover_pipx_packages() {
+            absorb(source);
+        }
+        absorb(match self.discover_pip_user_packages() {
+            Ok(packages) => SourceOutcome::Found(packages),
+            Err(e) => SourceOutcome::Failed(format!("pip --user: {e}")),
+        });
+
+        outcome
     }
 
     /// Discover uv tools using `uv tool list`
-    fn discover_uv_tools(&self) -> Result<Vec<GlobalPackage>> {
-        let output = Command::new("uv").args(["tool", "list"]).output();
-
-        match output {
+    fn discover_uv_tools(&self) -> SourceOutcome {
+        match Command::new("uv").args(["tool", "list"]).output() {
             Ok(output) if output.status.success() => {
-                self.parse_uv_tool_list(&String::from_utf8_lossy(&output.stdout))
+                match self.parse_uv_tool_list(&String::from_utf8_lossy(&output.stdout)) {
+                    Ok(packages) => SourceOutcome::Found(packages),
+                    Err(e) => SourceOutcome::Failed(format!("uv tool list: unparseable ({e})")),
+                }
             }
-            _ => Ok(Vec::new()), // uv not installed or failed, skip silently
+            Ok(output) => failed_exit("uv tool list", &output),
+            Err(e) => classify_spawn_error("uv tool list", &e),
         }
     }
 
@@ -134,19 +197,33 @@ impl GlobalPackageDiscovery {
     }
 
     /// Discover pipx packages
-    fn discover_pipx_packages(&self) -> Result<Vec<GlobalPackage>> {
+    ///
+    /// Returns one outcome for the `pipx list` probe and, when that probe
+    /// failed, a second one for the directory fallback. A failing `pipx` is
+    /// reported even if the fallback happens to find venvs, because the two
+    /// answers can disagree.
+    fn discover_pipx_packages(&self) -> Vec<SourceOutcome> {
         // Try `pipx list --json` for structured output
-        let output = Command::new("pipx").args(["list", "--json"]).output();
-
-        match output {
+        let probe = match Command::new("pipx").args(["list", "--json"]).output() {
             Ok(output) if output.status.success() => {
-                self.parse_pipx_json(&String::from_utf8_lossy(&output.stdout))
+                return match self.parse_pipx_json(&String::from_utf8_lossy(&output.stdout)) {
+                    Ok(packages) => vec![SourceOutcome::Found(packages)],
+                    Err(e) => vec![SourceOutcome::Failed(format!(
+                        "pipx list --json: unparseable ({e})"
+                    ))],
+                };
             }
-            _ => {
-                // Fall back to scanning ~/.local/pipx/venvs/
-                self.discover_pipx_from_directory()
-            }
-        }
+            Ok(output) => failed_exit("pipx list --json", &output),
+            Err(e) => classify_spawn_error("pipx list --json", &e),
+        };
+
+        // Fall back to scanning ~/.local/pipx/venvs/
+        let fallback = match self.discover_pipx_from_directory() {
+            Ok(packages) => SourceOutcome::Found(packages),
+            Err(e) => SourceOutcome::Failed(format!("pipx venv scan: {e}")),
+        };
+
+        vec![probe, fallback]
     }
 
     /// Parse pipx list --json output
@@ -569,6 +646,7 @@ ty v0.0.5
             package: pkg.clone(),
             latest: Version::from_str("2.0.0").unwrap(),
             has_update: true,
+            check_failed: false,
         };
         assert_eq!(check.update_severity(), Some(UpdateSeverity::Major));
 
@@ -577,6 +655,7 @@ ty v0.0.5
             package: pkg.clone(),
             latest: Version::from_str("1.1.0").unwrap(),
             has_update: true,
+            check_failed: false,
         };
         assert_eq!(check.update_severity(), Some(UpdateSeverity::Minor));
 
@@ -585,6 +664,7 @@ ty v0.0.5
             package: pkg.clone(),
             latest: Version::from_str("1.0.1").unwrap(),
             has_update: true,
+            check_failed: false,
         };
         assert_eq!(check.update_severity(), Some(UpdateSeverity::Patch));
 
@@ -593,6 +673,7 @@ ty v0.0.5
             package: pkg,
             latest: Version::from_str("1.0.0").unwrap(),
             has_update: false,
+            check_failed: false,
         };
         assert_eq!(check.update_severity(), None);
     }
@@ -609,6 +690,7 @@ ty v0.0.5
                 },
                 latest: Version::from_str("0.14.10").unwrap(),
                 has_update: true,
+                check_failed: false,
             },
             GlobalCheck {
                 package: GlobalPackage {
@@ -619,6 +701,7 @@ ty v0.0.5
                 },
                 latest: Version::from_str("24.10.0").unwrap(),
                 has_update: true,
+                check_failed: false,
             },
             GlobalCheck {
                 package: GlobalPackage {
@@ -629,6 +712,7 @@ ty v0.0.5
                 },
                 latest: Version::from_str("2.32.3").unwrap(),
                 has_update: true,
+                check_failed: false,
             },
             GlobalCheck {
                 package: GlobalPackage {
@@ -639,6 +723,7 @@ ty v0.0.5
                 },
                 latest: Version::from_str("3.0.0").unwrap(),
                 has_update: true,
+                check_failed: false,
             },
         ];
 

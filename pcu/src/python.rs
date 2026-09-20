@@ -1,15 +1,39 @@
+use crate::uv_python::{UvPythonDiscovery, uv_python_list};
 use check_updates_core::Version;
-use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
+
+/// Where the reported "current" Python came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PythonSource {
+    /// An active virtualenv (`VIRTUAL_ENV`) or a project-local `.venv`
+    Venv(PathBuf),
+    /// Whatever `python3`/`python` resolves to on PATH
+    Path(String),
+}
 
 /// Information about the Python environment
 #[derive(Debug, Clone)]
 pub struct PythonInfo {
     /// Current Python version
     pub current: Version,
-    /// Latest available Python version (from python.org)
+    /// Which interpreter `current` was read from
+    pub source: PythonSource,
+    /// Latest available patch *within the current major.minor series*.
+    ///
+    /// This is deliberately not the newest Python in existence: it is the
+    /// version you get by upgrading in place. Callers must not render its
+    /// absence, or equality with `current`, as "(latest)" without qualification
+    /// - see `latest_overall`.
     pub latest: Option<Version>,
+    /// Newest version uv knows about across *all* series. When this is greater
+    /// than `latest`, the interpreter is up to date within its series but a
+    /// newer series exists.
+    pub latest_overall: Option<Version>,
+    /// Why the latest-version lookup could not run, if it could not. When this
+    /// is `Some`, `latest` being `None` means "unknown", not "up to date".
+    pub latest_unknown_reason: Option<String>,
 }
 
 impl PythonInfo {
@@ -21,126 +45,128 @@ impl PythonInfo {
             false
         }
     }
+
+    /// Is the interpreter current within its series, with a newer series out?
+    pub fn newer_series_available(&self) -> bool {
+        match (&self.latest, &self.latest_overall) {
+            (Some(latest), Some(overall)) => overall > latest,
+            _ => false,
+        }
+    }
+}
+
+/// The interpreter of the active virtualenv, if there is one.
+fn venv_interpreter() -> Option<PathBuf> {
+    let roots = std::env::var("VIRTUAL_ENV")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(std::iter::once(PathBuf::from(".venv")));
+
+    for root in roots {
+        for rel in ["bin/python", "Scripts/python.exe"] {
+            let candidate = root.join(rel);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Read `--version` from one interpreter.
+///
+/// Python 2 prints `--version` to *stderr*, not stdout, so both streams have to
+/// be inspected: reading stdout only made the `python` fallback - which exists
+/// precisely to catch Python 2 - unable to ever succeed.
+fn version_of(program: &std::ffi::OsStr) -> Option<Version> {
+    let output = Command::new(program).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    for stream in [&output.stdout, &output.stderr] {
+        let text = String::from_utf8_lossy(stream);
+        if let Some(version_str) = text.trim().strip_prefix("Python ")
+            && let Ok(version) = Version::from_str(version_str.split_whitespace().next()?)
+        {
+            return Some(version);
+        }
+    }
+    None
 }
 
 /// Detect the current Python version
-pub fn detect_python_version() -> Option<Version> {
-    // Try python3 first, then python
-    let commands = [("python3", ["--version"]), ("python", ["--version"])];
+///
+/// Prefers the project's virtualenv over PATH: the header this feeds sits above
+/// a project's dependency table, so reporting a global `python3` there would
+/// describe a different environment than the one the table is about.
+pub fn detect_python_version() -> Option<(Version, PythonSource)> {
+    if let Some(path) = venv_interpreter()
+        && let Some(version) = version_of(path.as_os_str())
+    {
+        return Some((version, PythonSource::Venv(path)));
+    }
 
-    for (cmd, args) in &commands {
-        if let Ok(output) = Command::new(cmd).args(args.as_slice()).output()
-            && output.status.success()
-        {
-            let version_output = String::from_utf8_lossy(&output.stdout);
-            // Output is like "Python 3.11.5"
-            if let Some(version_str) = version_output.trim().strip_prefix("Python ")
-                && let Ok(version) = Version::from_str(version_str)
-            {
-                return Some(version);
-            }
+    for cmd in ["python3", "python"] {
+        if let Some(version) = version_of(std::ffi::OsStr::new(cmd)) {
+            return Some((version, PythonSource::Path(cmd.to_string())));
         }
     }
 
     None
 }
 
-/// Fetch the latest Python version for a given series from uv python list
+/// Latest versions uv knows about: (latest in `current`'s series, latest overall).
 ///
 /// Uses uv's own list of available Python versions as the source of truth,
-/// since endoflife.date may report versions that uv hasn't built yet.
-pub fn fetch_latest_python_version(current: &Version) -> Option<Version> {
-    let output = Command::new("uv").args(["python", "list"]).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
+/// since endoflife.date may report versions that uv hasn't built yet. The
+/// listing is fetched once per process and shared with `uv_python.rs`.
+pub fn fetch_latest_python_versions(
+    current: &Version,
+) -> Result<(Option<Version>, Option<Version>), String> {
+    let stdout = uv_python_list().map_err(|e| e.to_string())?;
+    let discovery = UvPythonDiscovery::new();
+    let all = discovery
+        .parse_uv_python_list(stdout)
+        .map_err(|e| e.to_string())?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let current_series = format!("{}.{}", current.major, current.minor);
-
-    // Find the highest version in the same series from uv's available list
-    let mut best: Option<Version> = None;
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+    let mut in_series: Option<Version> = None;
+    let mut overall: Option<Version> = None;
+    for info in &all {
+        let series = format!("{}.{}", info.version.major, info.version.minor);
+        if series == current_series && in_series.as_ref().is_none_or(|b| info.version > *b) {
+            in_series = Some(info.version.clone());
         }
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() {
-            continue;
-        }
-        let name = parts[0];
-        // Parse: "cpython-3.14.3-linux-x86_64-gnu"
-        let name_parts: Vec<&str> = name.split('-').collect();
-        if name_parts.len() < 2 || name_parts[0] != "cpython" {
-            continue;
-        }
-        if name.contains("+freethreaded") {
-            continue;
-        }
-        let version_str = name_parts[1];
-        if let Ok(version) = Version::from_str(version_str) {
-            let series = format!("{}.{}", version.major, version.minor);
-            if series == current_series && best.as_ref().is_none_or(|b| version > *b) {
-                best = Some(version);
-            }
+        if overall.as_ref().is_none_or(|b| info.version > *b) {
+            overall = Some(info.version.clone());
         }
     }
 
-    best
-}
-
-/// Build a map of series -> latest version from uv python list output
-pub fn fetch_all_latest_python_versions() -> HashMap<String, Version> {
-    let mut versions: HashMap<String, Version> = HashMap::new();
-
-    let output = match Command::new("uv").args(["python", "list"]).output() {
-        Ok(o) if o.status.success() => o,
-        _ => return versions,
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() {
-            continue;
-        }
-        let name = parts[0];
-        let name_parts: Vec<&str> = name.split('-').collect();
-        if name_parts.len() < 2 || name_parts[0] != "cpython" {
-            continue;
-        }
-        if name.contains("+freethreaded") {
-            continue;
-        }
-        let version_str = name_parts[1];
-        if let Ok(version) = Version::from_str(version_str) {
-            let series = format!("{}.{}", version.major, version.minor);
-            let entry = versions.entry(series).or_insert_with(|| version.clone());
-            if version > *entry {
-                *entry = version;
-            }
-        }
-    }
-
-    versions
+    Ok((in_series, overall))
 }
 
 /// Get Python info (current version and optionally latest available)
 pub fn get_python_info(check_latest: bool) -> Option<PythonInfo> {
-    let current = detect_python_version()?;
+    let (current, source) = detect_python_version()?;
 
-    let latest = if check_latest {
-        fetch_latest_python_version(&current)
+    let (latest, latest_overall, latest_unknown_reason) = if check_latest {
+        match fetch_latest_python_versions(&current) {
+            Ok((latest, overall)) => (latest, overall, None),
+            Err(reason) => (None, None, Some(reason)),
+        }
     } else {
-        None
+        (None, None, None)
     };
 
-    Some(PythonInfo { current, latest })
+    Some(PythonInfo {
+        current,
+        source,
+        latest,
+        latest_overall,
+        latest_unknown_reason,
+    })
 }
 
 #[cfg(test)]
@@ -153,29 +179,43 @@ mod tests {
         // This test depends on Python being installed
         let version = detect_python_version();
         // We just check it returns something reasonable
-        if let Some(v) = version {
+        if let Some((v, _)) = version {
             assert!(v.major >= 2);
+        }
+    }
+
+    fn info(current: &str, latest: Option<&str>, overall: Option<&str>) -> PythonInfo {
+        PythonInfo {
+            current: Version::from_str(current).unwrap(),
+            source: PythonSource::Path("python3".to_string()),
+            latest: latest.map(|v| Version::from_str(v).unwrap()),
+            latest_overall: overall.map(|v| Version::from_str(v).unwrap()),
+            latest_unknown_reason: None,
         }
     }
 
     #[test]
     fn test_python_info_has_update() {
-        let info = PythonInfo {
-            current: Version::from_str("3.11.0").unwrap(),
-            latest: Some(Version::from_str("3.13.1").unwrap()),
-        };
-        assert!(info.has_update());
+        assert!(info("3.11.0", Some("3.13.1"), None).has_update());
+        assert!(!info("3.13.1", Some("3.13.1"), None).has_update());
+        assert!(!info("3.11.0", None, None).has_update());
+    }
 
-        let info = PythonInfo {
-            current: Version::from_str("3.13.1").unwrap(),
-            latest: Some(Version::from_str("3.13.1").unwrap()),
-        };
-        assert!(!info.has_update());
+    #[test]
+    fn newer_series_is_distinguished_from_out_of_date() {
+        let up_to_date_in_series = info("3.11.14", Some("3.11.14"), Some("3.14.1"));
+        assert!(!up_to_date_in_series.has_update());
+        assert!(up_to_date_in_series.newer_series_available());
 
-        let info = PythonInfo {
-            current: Version::from_str("3.11.0").unwrap(),
-            latest: None,
-        };
-        assert!(!info.has_update());
+        let newest = info("3.14.1", Some("3.14.1"), Some("3.14.1"));
+        assert!(!newest.newer_series_available());
+    }
+
+    #[test]
+    fn unknown_latest_carries_a_reason() {
+        let mut i = info("3.11.14", None, None);
+        i.latest_unknown_reason = Some("`uv` is not installed or not on PATH".to_string());
+        assert!(!i.has_update());
+        assert!(i.latest_unknown_reason.is_some());
     }
 }

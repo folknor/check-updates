@@ -12,27 +12,6 @@
 Findings about the one operation in these tools that mutates the user's files:
 `ccu/src/updater.rs`, `ncu/src/updater.rs`, `pcu/src/updater.rs`.
 
-## UPD-016 - ccu's updater has no "did this actually apply" signal
-
-Surfaced while closing UPD-001, and made sharper by that fix.
-
-`ccu/src/updater.rs::update_dependency` returns `()`, so `apply_updates`
-reports every file it wrote as modified whether or not the lookup found
-anything. This was survivable while the updater swept every section - a
-mis-recorded section still hit the right entry somewhere. Now that a write is
-scoped to the single recorded `section`, a stale or wrong value fails silently
-with nothing to catch it.
-
-`pcu` already threads an applied/not-applied result through its updater; `ccu`
-does not. Same defect class as the "report only the updates that were actually
-applied" work, left undone on the ccu side.
-
-Related gap: no test covers a `target.'cfg(...)'` section round-trip.
-`resolve_section` matches those by prefix/suffix rather than splitting on `.`,
-because the target key is normally a quoted `cfg(...)` containing dots. That
-reasoning is sound (both `toml` and `toml_edit` hand back unquoted keys) but is
-only exercised through the plain `[dependencies]` case.
-
 ## UPD-005 - `apply_updates` does not report per-check outcomes
 
 Reported by pcu-runtime. Narrowed: the dishonest-`modified_files` half is fixed
@@ -123,35 +102,6 @@ The remaining ask is the byte span. It is deliberately a wave of its own: it
 changes `core::Dependency`, all three parser families and all three updaters,
 and the line-number half is now honest enough that nothing is bleeding while it
 waits.
-
-## UPD-009 - ncu and ccu still write manifests non-atomically
-
-Reported by pcu-runtime and ncu. Narrowed: pcu now writes through a sibling
-temp file and `fs::rename`, preserving permissions.
-
-`ncu/src/updater.rs` and `ccu/src/updater.rs` still use a plain `fs::write`
-straight over the manifest, so a crash or full disk mid-write leaves a truncated
-`package.json` / `Cargo.toml`. The pcu implementation is the model to copy.
-
-One caveat to copy knowingly rather than inherit: rename-into-place replaces a
-*symlinked* manifest with a regular file, where the old `fs::write` wrote
-through the link. Rare, but a behavior change, and pcu has it today.
-
-## UPD-012 - ccu prints "Dependencies updated:" before performing the write
-
-Reported by ccu.
-
-In non-JSON update mode the table is rendered before `apply_updates` is called.
-If the write fails (read-only file, TOML parse failure) the process has already
-claimed success, then errors out.
-
-## UPD-014 - `[target.*.build-dependencies]` is handled by neither parser nor updater
-
-Reported by ccu.
-
-`ccu` reads `[target.*.dependencies]` and `[target.*.dev-dependencies]` but not
-`[target.*.build-dependencies]`; the updater has the same gap. Consistently
-incomplete in both halves.
 
 ## Structural recommendation, as filed by the hunters
 

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use check_updates_core::{DependencyCheck, DependencyResolver};
+use check_updates_core::{DependencyCheck, DependencyResolver, UpdateSeverity};
 use clap::Parser;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -10,7 +10,7 @@ use pcu::output::{GlobalTableRenderer, TableRenderer, UvPythonTableRenderer};
 use pcu::parsers::{
     CondaParser, DependencyParser, LockfileParser, PyProjectParser, RequirementsParser,
 };
-use pcu::pypi::PyPiClient;
+use pcu::pypi::{FetchError, PyPiClient};
 use pcu::python::get_python_info;
 use pcu::updater::FileUpdater;
 use pcu::uv_python::{UvPythonCheck, UvPythonDiscovery, generate_uv_python_upgrade_commands};
@@ -20,20 +20,62 @@ use std::sync::{Arc, Mutex};
 const SCHEMA_VERSION: u32 = 1;
 const TOOL_NAME: &str = "pcu";
 
-fn errors_to_json(errors: &[String]) -> Vec<serde_json::Value> {
-    errors
+/// The JSON `errors` array: one object per failed PyPI lookup, carrying the
+/// stable `kind` tag from `FetchErrorKind::as_str` so a consumer can tell
+/// `not_found` from `rate_limited` without parsing `message`, followed by one
+/// `{"message"}` object per discovery tool that was present but did not
+/// answer. A present-but-broken tool must never read as a clean machine.
+fn errors_to_json(failures: &[FetchError], tool_errors: &[String]) -> Vec<serde_json::Value> {
+    failures
         .iter()
-        .map(|e| serde_json::json!({"message": e}))
+        .map(|f| {
+            serde_json::json!({
+                "package": f.package,
+                "kind": f.kind.as_str(),
+                "message": f.detail,
+            })
+        })
+        .chain(
+            tool_errors
+                .iter()
+                .map(|e| serde_json::json!({"message": e})),
+        )
         .collect()
 }
 
-fn emit_json_project(checks: &[DependencyCheck], errors: &[String]) -> Result<()> {
+/// Print registry failures under a header that matches what actually happened.
+///
+/// Only a 404 means "not on PyPI". A rate limit, a timeout or an outage says
+/// nothing about whether the package exists, and printing those under a
+/// "not found" header told the user their dependencies do not exist when the
+/// network was down.
+fn print_fetch_failures(failures: &[FetchError]) {
+    let (missing, unchecked): (Vec<&FetchError>, Vec<&FetchError>) =
+        failures.iter().partition(|f| f.kind.is_missing());
+
+    if !missing.is_empty() {
+        println!("{}", "Packages not found on PyPI:".dimmed());
+        for failure in missing {
+            println!("  {}", failure.detail.dimmed());
+        }
+        println!();
+    }
+    if !unchecked.is_empty() {
+        println!("{}", "Packages that could not be checked:".dimmed());
+        for failure in unchecked {
+            println!("  {}", failure.detail.dimmed());
+        }
+        println!();
+    }
+}
+
+fn emit_json_project(checks: &[DependencyCheck], failures: &[FetchError]) -> Result<()> {
     let report = serde_json::json!({
         "schema_version": SCHEMA_VERSION,
         "tool": TOOL_NAME,
         "mode": "project",
         "checks": checks,
-        "errors": errors_to_json(errors),
+        "errors": errors_to_json(failures, &[]),
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -42,7 +84,8 @@ fn emit_json_project(checks: &[DependencyCheck], errors: &[String]) -> Result<()
 fn emit_json_global(
     checks: &[GlobalCheck],
     python_versions: &[UvPythonCheck],
-    errors: &[String],
+    failures: &[FetchError],
+    tool_errors: &[String],
 ) -> Result<()> {
     let report = serde_json::json!({
         "schema_version": SCHEMA_VERSION,
@@ -50,7 +93,7 @@ fn emit_json_global(
         "mode": "global",
         "checks": checks,
         "python_versions": python_versions,
-        "errors": errors_to_json(errors),
+        "errors": errors_to_json(failures, tool_errors),
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -75,41 +118,59 @@ async fn run_global_mode(args: &Args) -> Result<()> {
         );
     }
 
-    // 1. Discover global packages, fetch Python info, and check uv Python versions concurrently
+    // 1. Discover global packages, fetch Python info, and check uv Python
+    //    versions concurrently.
+    //
+    //    All three of these shell out to `uv`/`pipx`/`python`. They used to sit
+    //    inside `async { <blocking call> }` blocks, which runs them strictly
+    //    serially on one runtime worker while claiming concurrency.
+    //    They go on the blocking pool instead. `discover_and_check` is declared
+    //    async but is blocking throughout, so it is driven with
+    //    `Handle::block_on` from a blocking thread rather than occupying a
+    //    runtime worker; tokio here has no `time`/`process` features, so there
+    //    is no timeout to wrap any of it in.
     let discovery = GlobalPackageDiscovery::new(args.pre_release);
     let uv_python_discovery = UvPythonDiscovery::new();
-    let python_info = get_python_info(true);
-    let (packages, uv_python_checks) = tokio::join!(async { discovery.discover() }, async {
-        uv_python_discovery.discover_and_check().await
+
+    let python_info_task = tokio::task::spawn_blocking(|| get_python_info(true));
+    let discovery_task = tokio::task::spawn_blocking(move || discovery.discover());
+    let uv_python_task = tokio::task::spawn_blocking(move || {
+        tokio::runtime::Handle::current().block_on(uv_python_discovery.discover_and_check())
     });
+
+    let python_info = python_info_task.await.unwrap_or(None);
+    let discovery_outcome = discovery_task
+        .await
+        .map_err(|e| anyhow::anyhow!("global package discovery panicked: {e}"))?;
+    let uv_python_checks = match uv_python_task.await {
+        Ok(result) => result,
+        Err(e) => Err(anyhow::anyhow!("uv Python discovery panicked: {e}")),
+    };
+
+    let packages = discovery_outcome.packages;
+    // Errors that are not PyPI fetch failures: a discovery tool that is
+    // installed but broken, and a failing `uv python list`. Without these the
+    // envelope asserts "no packages, no errors" when it simply does not know.
+    let mut tool_errors = discovery_outcome.errors;
+    if let Err(e) = &uv_python_checks {
+        tool_errors.push(format!("uv python list: {e}"));
+    }
 
     // Print Python version header (suppress in JSON mode)
     if !args.json
         && let Some(py_info) = python_info
     {
-        let version_str = if let Some(ref latest) = py_info.latest {
-            if py_info.has_update() {
-                format!(
-                    "Python {} ({} available)",
-                    py_info.current,
-                    latest.to_string().yellow()
-                )
-            } else {
-                format!("Python {} (latest)", py_info.current)
-            }
-        } else {
-            format!("Python {}", py_info.current)
-        };
-        println!("{version_str}\n");
+        println!("{}\n", python_header(&py_info));
     }
 
     if packages.is_empty() {
         if args.json {
-            let uv_checks = uv_python_checks.ok().unwrap_or_default();
-            emit_json_global(&[], &uv_checks, &[])?;
+            let uv_checks = uv_python_checks.unwrap_or_default();
+            emit_json_global(&[], &uv_checks, &[], &tool_errors)?;
         } else {
             println!("No globally installed packages found.");
             println!("Checked: uv tools, pipx, pip --user");
+            print_tool_errors(&tool_errors);
         }
         return Ok(());
     }
@@ -146,35 +207,57 @@ async fn run_global_mode(args: &Args) -> Result<()> {
     progress_bar.finish_and_clear();
 
     let package_infos = result.packages;
-    let fetch_errors = result.errors;
+    let fetch_failures = result.failures;
 
     // 3. Build check results
     let mut checks: Vec<GlobalCheck> = Vec::new();
+    let mut major_filtered = 0usize;
 
     for package in packages {
-        if let Some(info) = package_infos.get(&package.name) {
-            // Determine target version based on flags
-            let target = if args.minor {
-                // -m flag: limit to same major
-                info.versions
-                    .iter()
-                    .filter(|v| v.major == package.installed_version.major)
-                    .max()
-                    .cloned()
-                    .unwrap_or_else(|| package.installed_version.clone())
-            } else {
-                // Default/force_latest: absolute latest (no constraints in global mode)
-                info.latest.clone()
-            };
-
-            let has_update = target > package.installed_version;
-
+        let Some(info) = package_infos.get(&package.name) else {
+            // The PyPI lookup failed for this package. It used to be dropped
+            // here, so it was absent from the table and from the JSON `checks`
+            // array, surviving only as free text in `errors`. Keep
+            // the row and mark it: `latest` is a placeholder, not a claim.
+            let installed = package.installed_version.clone();
             checks.push(GlobalCheck {
                 package,
-                latest: target,
-                has_update,
+                latest: installed,
+                has_update: false,
+                check_failed: true,
             });
+            continue;
+        };
+
+        // Global mode always targets the absolute latest release. Nothing is
+        // written to disk here, and the upgrade commands we print
+        // (`uv tool upgrade --all`, `pipx upgrade-all`) have no way to aim at
+        // anything but latest - so retargeting the row to the newest
+        // same-major version, as `-m` used to do, printed a version the
+        // printed command would not install. `-m` is now the same severity
+        // filter it is in project mode: it narrows *which rows are reported*,
+        // not what they are reported against. `-f` means "no filter", which is
+        // the default here, and is checked first so `-g -mf` is no longer
+        // silently swallowed by `-m`.
+        let target = info.latest.clone();
+        let has_update = target > package.installed_version;
+
+        let check = GlobalCheck {
+            package,
+            latest: target,
+            has_update,
+            check_failed: false,
+        };
+
+        let filtered_out = !args.force
+            && args.minor
+            && matches!(check.update_severity(), Some(UpdateSeverity::Major));
+        if filtered_out {
+            major_filtered += 1;
+            continue;
         }
+
+        checks.push(check);
     }
 
     // 4. Display results (renderer shows "All packages up to date." per section if needed)
@@ -183,7 +266,7 @@ async fn run_global_mode(args: &Args) -> Result<()> {
             Ok(v) => v.clone(),
             Err(_) => Vec::new(),
         };
-        emit_json_global(&checks, &uv_checks, &fetch_errors)?;
+        emit_json_global(&checks, &uv_checks, &fetch_failures, &tool_errors)?;
         return Ok(());
     }
 
@@ -218,16 +301,103 @@ async fn run_global_mode(args: &Args) -> Result<()> {
         }
     }
 
-    // 6. Print fetch errors at the end
-    if !fetch_errors.is_empty() {
+    // 6. Print fetch failures at the end
+    if !fetch_failures.is_empty() {
         println!();
-        println!("{}", "Packages not found on PyPI:".dimmed());
-        for error in &fetch_errors {
-            println!("  {}", error.dimmed());
-        }
+        print_fetch_failures(&fetch_failures);
     }
 
+    // The table only renders rows with an update, so packages whose lookup
+    // failed would otherwise leave no trace on the human path either.
+    let unchecked: Vec<&str> = checks
+        .iter()
+        .filter(|c| c.check_failed)
+        .map(|c| c.package.name.as_str())
+        .collect();
+    if !unchecked.is_empty() {
+        println!();
+        println!(
+            "{}",
+            format!(
+                "Could not check {} package(s): {}",
+                unchecked.len(),
+                unchecked.join(", ")
+            )
+            .dimmed()
+        );
+    }
+
+    if major_filtered > 0 {
+        println!();
+        println!(
+            "{major_filtered} major update(s) hidden by {}. Drop it or pass {} to see them.",
+            "-m".cyan(),
+            "-f".cyan()
+        );
+    }
+
+    print_tool_errors(&tool_errors);
+
     Ok(())
+}
+
+/// The one-line Python header printed above both tables.
+///
+/// `PythonInfo::latest` is the newest patch *within the current series*, and
+/// the header has to say so: the old text printed "(latest)" for a 3.11.14 on
+/// a machine where 3.14 exists, and printed nothing at all when the lookup
+/// had failed, which made "uv is broken" and "this is the newest Python"
+/// look identical. Every state the struct distinguishes gets its
+/// own wording here.
+fn python_header(info: &pcu::python::PythonInfo) -> String {
+    use pcu::python::PythonSource;
+
+    let mut line = format!("Python {}", info.current);
+    if let PythonSource::Venv(path) = &info.source {
+        line.push_str(&format!(" in {}", path.display().to_string().dimmed()));
+    }
+
+    let series = format!("{}.{}", info.current.major, info.current.minor);
+    match (&info.latest, &info.latest_unknown_reason) {
+        (Some(latest), _) if info.has_update() => {
+            line.push_str(&format!(" ({} available)", latest.to_string().yellow()));
+        }
+        (Some(_), _) => line.push_str(&format!(" (latest in {series} series)")),
+        (None, Some(reason)) => {
+            line.push_str(&format!(
+                " ({})",
+                format!("latest unknown: {reason}").dimmed()
+            ));
+        }
+        (None, None) => {}
+    }
+
+    if info.newer_series_available()
+        && let Some(overall) = &info.latest_overall
+    {
+        line.push_str(&format!(
+            "; Python {} is available via {}",
+            overall.to_string().yellow(),
+            "uv python install".cyan()
+        ));
+    }
+
+    line
+}
+
+/// Report discovery tools that are installed but did not answer
+///
+/// A missing `uv` or `pipx` is silent - that is a clean machine. A present one
+/// that failed is not, and must not read as "nothing installed".
+fn print_tool_errors(errors: &[String]) {
+    if errors.is_empty() {
+        return;
+    }
+    println!();
+    println!("{}", "Some sources could not be checked:".dimmed());
+    for error in errors {
+        println!("  {}", error.dimmed());
+    }
 }
 
 async fn run_project_mode(args: &Args) -> Result<()> {
@@ -323,36 +493,19 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     let pypi_result = pypi_result?;
     let package_infos = pypi_result.packages;
-    let fetch_errors = pypi_result.errors;
+    let fetch_failures = pypi_result.failures;
     progress_bar.finish_and_clear();
 
     // Print Python version header (suppress in JSON mode)
     if !args.json
         && let Some(py_info) = python_info
     {
-        let version_str = if let Some(ref latest) = py_info.latest {
-            if py_info.has_update() {
-                format!(
-                    "Python {} ({} available)",
-                    py_info.current,
-                    latest.to_string().yellow()
-                )
-            } else {
-                format!("Python {} (latest)", py_info.current)
-            }
-        } else {
-            format!("Python {}", py_info.current)
-        };
-        println!("{version_str}\n");
+        println!("{}\n", python_header(&py_info));
     }
 
-    // Print fetch errors if any (suppressed in JSON mode; included in payload)
-    if !fetch_errors.is_empty() && !args.json {
-        println!("{}", "Packages not found on PyPI:".dimmed());
-        for error in &fetch_errors {
-            println!("  {}", error.dimmed());
-        }
-        println!();
+    // Print fetch failures if any (suppressed in JSON mode; included in payload)
+    if !args.json {
+        print_fetch_failures(&fetch_failures);
     }
 
     // 4. Resolve updates
@@ -398,7 +551,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
             let updater = FileUpdater::new();
             let _ = updater.apply_updates(&checks, args.minor, args.force)?;
         }
-        emit_json_project(&checks, &fetch_errors)?;
+        emit_json_project(&checks, &fetch_failures)?;
         return Ok(());
     }
 

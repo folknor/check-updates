@@ -1,5 +1,6 @@
 use crate::types::{DependencyCheck, UpdateSeverity};
 use colored::Colorize;
+use std::collections::HashSet;
 
 /// Renders the dependency check results in a table format
 pub struct TableRenderer {
@@ -19,8 +20,45 @@ impl TableRenderer {
         self.render_deduped(&checks_with_updates, header);
     }
 
-    /// Render a deduplicated list of checks
+    /// Render a list of checks, one row per distinct `(name, target)` pair.
+    ///
+    /// The deduplication lives here rather than in the callers. All three CLIs
+    /// report one `DependencyCheck` per *declaration*, so a crate declared by
+    /// five workspace members produces five checks that differ only in which
+    /// manifest they came from; the table has no column for the manifest, so
+    /// without this they print as five identical rows. Each CLI used to
+    /// hand-roll exactly this filter before calling in - the same key, the same
+    /// `HashSet`, three copies - and ncu's was added only after the per
+    /// declaration change made the duplicates visible. Doing it here is what
+    /// the name has always claimed, and it cannot be forgotten by a new caller.
+    ///
+    /// The key is the name plus the *rendered* target, not the target itself:
+    /// two declarations that resolve to the same version through different
+    /// specs produce the same row, and one row is what should be printed. A
+    /// declaration that resolves somewhere else keeps its own row, because the
+    /// difference is visible in the table.
+    ///
+    /// What deliberately stays in the callers is the *filtering* - `has_update`
+    /// and the `--update`/severity policy. That is a question about which
+    /// dependencies the run is about, decided from CLI flags this function does
+    /// not see, and it is not a display concern. Dedup is idempotent, so a
+    /// caller that still filters and dedups is correct too, just redundant.
     pub fn render_deduped(&self, checks: &[&DependencyCheck], header: &str) {
+        let mut seen: HashSet<(&str, String)> = HashSet::new();
+        let deduped: Vec<&DependencyCheck> = checks
+            .iter()
+            .copied()
+            .filter(|c| {
+                let target = c
+                    .target
+                    .as_ref()
+                    .map(std::string::ToString::to_string)
+                    .unwrap_or_default();
+                seen.insert((c.dependency.name.as_str(), target))
+            })
+            .collect();
+        let checks: &[&DependencyCheck] = &deduped;
+
         if checks.is_empty() {
             println!("All dependencies are up to date!");
             return;
@@ -52,15 +90,31 @@ impl TableRenderer {
 
         let max_from = checks
             .iter()
-            .filter_map(|c| c.current_version())
-            .map(|v| v.to_string().chars().count())
+            .map(|c| {
+                c.current_version()
+                    .map(std::string::ToString::to_string)
+                    .unwrap_or_default()
+                    .chars()
+                    .count()
+            })
             .max()
             .unwrap_or(0);
 
+        // Widths are measured over exactly what `print_row` will print, empty
+        // fallback included, rather than over the `Some` values only. The two
+        // agree today - an absent version renders as `""`, which is never the
+        // widest - but computing the width from a different expression than the
+        // one that produces the cell is how a column silently stops lining up.
         let max_to = checks
             .iter()
-            .filter_map(|c| c.target.as_ref())
-            .map(|v| v.to_string().chars().count())
+            .map(|c| {
+                c.target
+                    .as_ref()
+                    .map(std::string::ToString::to_string)
+                    .unwrap_or_default()
+                    .chars()
+                    .count()
+            })
             .max()
             .unwrap_or(0);
 
@@ -97,7 +151,15 @@ impl TableRenderer {
             String::new()
         };
 
-        println!(
+        // Built then trimmed rather than printed directly: the last column is
+        // the severity, which is empty whenever `update_severity()` returns
+        // `None`, so the row would end in the padding of the target column plus
+        // the two-space separator - pure trailing blanks that show up in diffs
+        // and in anything copy-pasted out of the terminal. Trimming the right
+        // edge cannot disturb the columns, which are all to the left of it.
+        // When the severity is present and coloured the row ends in the reset
+        // escape, not whitespace, so nothing is trimmed there.
+        let row = format!(
             "  {:<name_w$}  {:>from_w$} → {:<to_w$}  {}{}",
             check.dependency.name,
             from,
@@ -108,6 +170,7 @@ impl TableRenderer {
             from_w = from_width,
             to_w = to_width,
         );
+        println!("{}", row.trim_end());
     }
 
     /// Format severity with optional colors
@@ -156,5 +219,28 @@ mod tests {
 
         let byte_padded = format!("{name:<w$}|", w = name.len());
         assert_eq!(byte_padded, "kaffé |", "byte width over-pads by one column");
+    }
+
+    /// Pins the two halves of the row-trimming rule the renderers rely on: an
+    /// empty last column leaves the row ending in pure blanks, and trimming
+    /// them cannot eat anything from a row whose last column is non-empty.
+    #[test]
+    fn trailing_trim_removes_only_the_empty_last_column() {
+        let empty_severity = format!("  {:<8}  {:>6} → {:<6}  {}", "serde", "1.0.2", "1.0.9", "");
+        assert!(
+            empty_severity.ends_with("  "),
+            "an empty severity leaves trailing blanks"
+        );
+        assert_eq!(empty_severity.trim_end(), "  serde      1.0.2 → 1.0.9");
+
+        let with_severity = format!(
+            "  {:<8}  {:>6} → {:<6}  {}",
+            "serde", "1.0.2", "1.0.9", "minor"
+        );
+        assert_eq!(
+            with_severity.trim_end(),
+            with_severity,
+            "a populated severity column must survive untouched"
+        );
     }
 }

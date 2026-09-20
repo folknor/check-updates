@@ -5,6 +5,11 @@ use colored::Colorize;
 // Re-export TableRenderer from core for convenience
 pub use check_updates_core::TableRenderer;
 
+/// Stand-in for a git hash we could not read, and the width the hash column is
+/// padded to. Seven characters, matching the short hash shown for packages we
+/// could read.
+const MISSING_HASH: &str = "???????";
+
 /// Renders global cargo crate check results
 pub struct GlobalTableRenderer {
     show_colors: bool,
@@ -80,10 +85,22 @@ impl GlobalTableRenderer {
             .map(|c| c.package.installed_version.to_string().chars().count())
             .max()
             .unwrap_or(0);
+        // Measured over exactly what the row printer emits, empty fallback
+        // included, rather than over the `Some` values only. `has_update` is a
+        // plain bool that nothing ties to `latest_version` being `Some`, so a
+        // row with no latest version is not ruled out by the types; it renders
+        // as an empty cell either way, but the width must come from the same
+        // expression as the cell or the column can stop lining up.
         let max_latest = checks
             .iter()
-            .filter_map(|c| c.latest_version.as_ref())
-            .map(|v| v.to_string().chars().count())
+            .map(|c| {
+                c.latest_version
+                    .as_ref()
+                    .map(std::string::ToString::to_string)
+                    .unwrap_or_default()
+                    .chars()
+                    .count()
+            })
             .max()
             .unwrap_or(0);
 
@@ -122,7 +139,12 @@ impl GlobalTableRenderer {
                 None => String::new(),
             };
 
-            println!(
+            // Trimmed on the right: the severity is the last column and is
+            // empty when `update_severity()` returns `None`, which would leave
+            // the row ending in the latest-version padding plus the separator.
+            // Everything that carries meaning is to the left, so trimming
+            // cannot disturb the alignment.
+            let row = format!(
                 "  {:<name_w$}  {:>inst_w$} → {:<to_w$}  {}",
                 check.package.name,
                 check.package.installed_version.to_string(),
@@ -132,6 +154,7 @@ impl GlobalTableRenderer {
                 inst_w = max_installed,
                 to_w = max_latest,
             );
+            println!("{}", row.trim_end());
         }
     }
 
@@ -214,22 +237,34 @@ impl GlobalTableRenderer {
                     // Git hashes are hex, but the value is read out of
                     // `.crates.toml`, which we do not control.
                     .map(|h| h.char_indices().nth(7).map_or(h, |(i, _)| &h[..i]))
-                    .unwrap_or("???????");
+                    .unwrap_or(MISSING_HASH);
 
-                println!(
-                    "  {:<name_w$}  {}  {}",
+                // Padded like every other column. The truncation above caps the
+                // hash at 7 chars and the placeholder is 7 chars, so this is a
+                // no-op for well-formed input - but a hash shorter than 7 chars
+                // in `.crates.toml` would otherwise shift the status column of
+                // that one row left and leave the group ragged.
+                let row = format!(
+                    "  {:<name_w$}  {:<hash_w$}  {}",
                     check.package.name,
                     hash_str,
                     status,
                     name_w = max_name,
+                    hash_w = MISSING_HASH.chars().count(),
                 );
+                println!("{}", row.trim_end());
             } else {
-                println!(
+                // Trimmed for the same reason as elsewhere: `status` is the
+                // last column and can be empty, for instance when a package is
+                // flagged as having an update but the commit count came back
+                // absent.
+                let row = format!(
                     "  {:<name_w$}  {}",
                     check.package.name,
                     status,
                     name_w = max_name,
                 );
+                println!("{}", row.trim_end());
             }
         }
     }

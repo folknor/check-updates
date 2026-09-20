@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use check_updates_core::{DependencyCheck, DependencyResolver, Version};
+use check_updates_core::{DependencyCheck, DependencyResolver, UpdateSeverity, Version};
 use clap::Parser;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use ncu::cli::Args;
 use ncu::detector::ProjectDetector;
 use ncu::global::{GlobalCheck, GlobalPackageDiscovery, generate_upgrade_commands};
-use ncu::npm::NpmClient;
+use ncu::npm::{FetchError, NpmClient};
 use ncu::output::{GlobalTableRenderer, TableRenderer};
 use ncu::parsers::{LockfileParser, PackageJsonParser};
 use ncu::updater::FileUpdater;
@@ -16,14 +16,51 @@ use ncu::updater::FileUpdater;
 const SCHEMA_VERSION: u32 = 1;
 const TOOL_NAME: &str = "ncu";
 
-fn errors_to_json(errors: &[(String, String)]) -> Vec<serde_json::Value> {
+/// One JSON object per failed registry lookup. `kind` is the stable tag from
+/// `FetchErrorKind::as_str`, so a consumer can tell `not_found` from
+/// `rate_limited` without parsing `message`. `name` is kept for existing
+/// consumers; `package` is the field the other two tools use.
+fn errors_to_json(errors: &[FetchError]) -> Vec<serde_json::Value> {
     errors
         .iter()
-        .map(|(name, message)| serde_json::json!({"name": name, "message": message}))
+        .map(|f| {
+            serde_json::json!({
+                "name": f.package,
+                "package": f.package,
+                "kind": f.kind.as_str(),
+                "message": f.detail,
+            })
+        })
         .collect()
 }
 
-fn emit_json_project(checks: &[DependencyCheck], errors: &[(String, String)]) -> Result<()> {
+/// Print registry failures under a header that matches what actually happened.
+///
+/// Only a 404 means "not on npm". A rate limit, a timeout or an outage says
+/// nothing about whether the package exists, and printing those under a
+/// "not found" header told the user their dependencies do not exist when the
+/// network was down.
+fn print_fetch_failures(failures: &[FetchError]) {
+    let (missing, unchecked): (Vec<&FetchError>, Vec<&FetchError>) =
+        failures.iter().partition(|f| f.kind.is_missing());
+
+    if !missing.is_empty() {
+        println!();
+        println!("{}", "Packages not found on npm:".dimmed());
+        for failure in missing {
+            println!("  {}", failure.detail.dimmed());
+        }
+    }
+    if !unchecked.is_empty() {
+        println!();
+        println!("{}", "Packages that could not be checked:".dimmed());
+        for failure in unchecked {
+            println!("  {}", failure.detail.dimmed());
+        }
+    }
+}
+
+fn emit_json_project(checks: &[DependencyCheck], errors: &[FetchError]) -> Result<()> {
     let report = serde_json::json!({
         "schema_version": SCHEMA_VERSION,
         "tool": TOOL_NAME,
@@ -35,7 +72,7 @@ fn emit_json_project(checks: &[DependencyCheck], errors: &[(String, String)]) ->
     Ok(())
 }
 
-fn emit_json_global(checks: &[GlobalCheck], errors: &[(String, String)]) -> Result<()> {
+fn emit_json_global(checks: &[GlobalCheck], errors: &[FetchError]) -> Result<()> {
     let report = serde_json::json!({
         "schema_version": SCHEMA_VERSION,
         "tool": TOOL_NAME,
@@ -104,42 +141,47 @@ async fn run_global_mode(args: &Args) -> Result<()> {
     progress.finish_and_clear();
 
     let mut package_infos: HashMap<String, _> = HashMap::new();
-    let mut errors: Vec<(String, String)> = Vec::new();
+    let mut errors: Vec<FetchError> = Vec::new();
 
     for (name, result) in results {
         match result {
             Ok(info) => {
                 package_infos.insert(name, info);
             }
-            Err(e) => {
-                errors.push((name, e.to_string()));
-            }
+            Err(e) => errors.push(e),
         }
     }
 
     // 3. Build check results
     let mut checks: Vec<GlobalCheck> = Vec::new();
+    let mut major_filtered = 0usize;
 
     for package in packages {
         if let Some(info) = package_infos.get(&package.name) {
-            let target = if args.minor {
-                info.versions
-                    .iter()
-                    .filter(|v| v.major == package.installed_version.major)
-                    .max()
-                    .cloned()
-                    .unwrap_or_else(|| package.installed_version.clone())
-            } else {
-                info.latest.clone()
+            // Global mode always targets the absolute latest release. The
+            // upgrade command we print (`npm install -g <name>`) has no way to
+            // aim at anything but latest, so retargeting the row to the newest
+            // same-major version, as `-m` used to do here, printed a version
+            // the printed command would not install. `-m` is the same severity
+            // filter it is in project mode and in pcu's global mode: it hides
+            // major rows, it does not change what a row is compared against.
+            // `-f` lifts the filter.
+            let has_update = info.latest > package.installed_version;
+            let check = GlobalCheck {
+                package,
+                latest: info.latest.clone(),
+                has_update,
             };
 
-            let has_update = target > package.installed_version;
+            let filtered_out = !args.force
+                && args.minor
+                && matches!(check.update_severity(), Some(UpdateSeverity::Major));
+            if filtered_out {
+                major_filtered += 1;
+                continue;
+            }
 
-            checks.push(GlobalCheck {
-                package,
-                latest: target,
-                has_update,
-            });
+            checks.push(check);
         }
     }
 
@@ -162,14 +204,17 @@ async fn run_global_mode(args: &Args) -> Result<()> {
         }
     }
 
-    // 6. Print errors
-    if !errors.is_empty() {
+    if major_filtered > 0 {
         println!();
-        println!("{}", "Packages not found on npm:".dimmed());
-        for (name, error) in errors {
-            println!("  {}: {}", name.dimmed(), error.dimmed());
-        }
+        println!(
+            "{major_filtered} major update(s) hidden by {}. Drop it or pass {} to see them.",
+            "-m".cyan(),
+            "-f".cyan()
+        );
     }
+
+    // 6. Print errors
+    print_fetch_failures(&errors);
 
     Ok(())
 }
@@ -257,16 +302,14 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     // Build package info map
     let mut package_infos: HashMap<String, _> = HashMap::new();
-    let mut errors: Vec<(String, String)> = Vec::new();
+    let mut errors: Vec<FetchError> = Vec::new();
 
     for (name, result) in results {
         match result {
             Ok(info) => {
                 package_infos.insert(name, info);
             }
-            Err(e) => {
-                errors.push((name, e.to_string()));
-            }
+            Err(e) => errors.push(e),
         }
     }
 
@@ -355,13 +398,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     }
 
     // Show errors at the end
-    if !errors.is_empty() {
-        println!();
-        println!("Packages not found on npm:");
-        for (name, error) in errors {
-            println!("  {name}: {error}");
-        }
-    }
+    print_fetch_failures(&errors);
 
     Ok(())
 }

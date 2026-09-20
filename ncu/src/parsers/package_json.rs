@@ -41,33 +41,39 @@ impl PackageJsonParser {
     ) -> Vec<Dependency> {
         let mut result = Vec::new();
 
-        for (name, version_value) in deps {
+        for (key, version_value) in deps {
             if let Some(version_str) = version_value.as_str() {
-                // Skip non-registry deps (git, file, link, workspace)
-                if version_str.starts_with("git")
-                    || version_str.starts_with("file:")
-                    || version_str.starts_with("link:")
-                    || version_str.starts_with("workspace:")
-                    || version_str.contains("github:")
-                    || version_str.contains("://")
-                {
+                // Allow-list, not deny-list: see `classify_specifier`.
+                let Some(specifier) = classify_specifier(version_str) else {
                     continue;
-                }
+                };
 
-                if let Ok(version_spec) = Self::parse_npm_version(version_str) {
-                    let line_number = Self::find_line_number(content, section, name);
+                if let Ok(version_spec) = Self::parse_npm_version(specifier.range) {
+                    let line_number = Self::find_line_number(content, section, key);
                     let original_line = line_number
                         .and_then(|n| content.lines().nth(n.saturating_sub(1)))
                         .unwrap_or("")
                         .to_string();
 
+                    // `Dependency::name` is contractually the *upstream* name on
+                    // the registry, so an `npm:` alias reports the aliased
+                    // package and keeps the local table key in `manifest_key` -
+                    // the same split ccu uses for Cargo `package = "..."`
+                    // renames. The updater writes back under `manifest_key`.
+                    let (name, manifest_key) = match specifier.upstream {
+                        Some(upstream) if upstream != key.as_str() => {
+                            (upstream.to_string(), Some(key.clone()))
+                        }
+                        _ => (key.clone(), None),
+                    };
+
                     result.push(Dependency {
-                        name: name.clone(),
+                        name,
                         version_spec,
                         source_file: source_file.to_path_buf(),
                         line_number,
                         original_line,
-                        manifest_key: None,
+                        manifest_key,
                         section: Some(section.to_string()),
                     });
                 }
@@ -117,6 +123,111 @@ impl PackageJsonParser {
 
         None
     }
+}
+
+/// A package.json specifier we are prepared to resolve against the npm registry.
+pub struct RegistrySpecifier<'a> {
+    /// Upstream package name, when the specifier names one explicitly
+    /// (`npm:lodash@^4`). `None` means "whatever the table key says".
+    pub upstream: Option<&'a str>,
+    /// The semver range part, with any alias prefix removed.
+    pub range: &'a str,
+}
+
+/// Decide whether a package.json specifier addresses the npm registry, and if
+/// so under which name and range.
+///
+/// This replaced a deny-list (`git`/`file:`/`link:`/`workspace:`/`github:`/
+/// `://`). A deny-list cannot work here, for a structural reason:
+/// `VersionSpec::parse` never fails - anything it does not recognise becomes
+/// `VersionSpec::Complex(text)` - so every specifier the deny-list forgot was
+/// shipped to the registry verbatim as a package name. The list forgot pnpm
+/// `catalog:`, yarn berry `patch:`/`portal:`/`exec:`, bare GitHub shorthand
+/// (`user/repo`), dist-tags (`latest`, `next`), tarball paths and `npm:`
+/// aliases; npm's specifier grammar is open-ended, so it would have kept
+/// forgetting new ones. The allow-list inverts the failure mode: an unknown
+/// specifier is silently skipped rather than turned into a bogus registry
+/// query (a 404 in the error list, or worse a real unrelated package).
+///
+/// Accepted: an optional `npm:<name>@` alias prefix followed by text made only
+/// of semver-range characters and containing at least one digit, plus the
+/// "any version" spellings `*` and `""`. That admits `^1.2.3`, `~1.2`, `1.x`,
+/// `>=1 <2`, `^17 || ^18`, `1.2.3-beta.1`. It rejects anything containing `:`,
+/// `/` or `#`, and anything digit-free.
+pub fn classify_specifier(version_str: &str) -> Option<RegistrySpecifier<'_>> {
+    let s = version_str.trim();
+
+    if let Some(rest) = s.strip_prefix("npm:") {
+        // `npm:@scope/pkg@^1.0.0` - the separating `@` is the last one, and a
+        // leading `@` belongs to the scope.
+        let split = rest
+            .char_indices()
+            .skip(1)
+            .filter(|(_, c)| *c == '@')
+            .map(|(i, _)| i)
+            .last();
+        let (name, range) = match split {
+            Some(i) => (&rest[..i], &rest[i + 1..]),
+            // `"lodash4": "npm:lodash"` - an alias with no range at all.
+            None => (rest, "*"),
+        };
+        if !is_package_name(name) || !is_registry_range(range) {
+            return None;
+        }
+        return Some(RegistrySpecifier {
+            upstream: Some(name),
+            range,
+        });
+    }
+
+    if is_registry_range(s) {
+        Some(RegistrySpecifier {
+            upstream: None,
+            range: s,
+        })
+    } else {
+        None
+    }
+}
+
+fn is_package_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 214 {
+        return false;
+    }
+    let body = match name.strip_prefix('@') {
+        // Scoped: exactly one `/`, both halves non-empty.
+        Some(scoped) => match scoped.split_once('/') {
+            Some((scope, pkg)) if !scope.is_empty() && !pkg.is_empty() && !pkg.contains('/') => {
+                return scope.chars().chain(pkg.chars()).all(is_name_char);
+            }
+            _ => return false,
+        },
+        None => name,
+    };
+    body.chars().all(is_name_char)
+}
+
+fn is_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')
+}
+
+fn is_registry_range(range: &str) -> bool {
+    let range = range.trim();
+    if range.is_empty() || range == "*" || range == "x" || range == "X" {
+        return true;
+    }
+    if !range.chars().any(|c| c.is_ascii_digit()) {
+        // Dist-tags (`latest`, `next`) resolve on the registry but carry no
+        // range we could compare or rewrite, so they are not ours to report.
+        return false;
+    }
+    range.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                '.' | '-' | '+' | '^' | '~' | '<' | '>' | '=' | '*' | '|' | ',' | ' '
+            )
+    })
 }
 
 /// package.json dependency tables ncu reads and writes, in file-conventional order.
@@ -187,6 +298,92 @@ mod tests {
 
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].name, "express");
+
+        Ok(())
+    }
+
+    #[test]
+    fn npm_alias_reports_the_upstream_name_and_keeps_the_local_key() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        writeln!(
+            file,
+            r#"{{
+  "dependencies": {{
+    "lodash4": "npm:lodash@^4.17.0",
+    "ui": "npm:@scope/ui@~2.1.0",
+    "whole": "npm:left-pad"
+  }}
+}}"#
+        )?;
+
+        let deps = PackageJsonParser::new().parse(file.path())?;
+        assert_eq!(deps.len(), 3);
+
+        let lodash = deps.iter().find(|d| d.name == "lodash").unwrap();
+        assert_eq!(lodash.manifest_key.as_deref(), Some("lodash4"));
+        assert_eq!(lodash.version_spec.version_string().unwrap(), "4.17.0");
+
+        let ui = deps.iter().find(|d| d.name == "@scope/ui").unwrap();
+        assert_eq!(ui.manifest_key.as_deref(), Some("ui"));
+
+        let whole = deps.iter().find(|d| d.name == "left-pad").unwrap();
+        assert_eq!(whole.manifest_key.as_deref(), Some("whole"));
+        assert!(matches!(whole.version_spec, VersionSpec::Any));
+
+        Ok(())
+    }
+
+    #[test]
+    fn non_registry_protocols_are_not_queried() {
+        for spec in [
+            "catalog:",
+            "catalog:default",
+            "patch:left-pad@1.0.0#./patch.diff",
+            "portal:../pkg",
+            "exec:./gen.js",
+            "workspace:*",
+            "link:../pkg",
+            "file:../pkg",
+            "git+ssh://git@github.com/u/r.git",
+            "user/repo",
+            "user/repo#semver:^1.0.0",
+            "https://example.com/pkg.tgz",
+            "latest",
+            "next",
+            "npm:",
+            "npm:@scope@1.0.0",
+        ] {
+            assert!(
+                classify_specifier(spec).is_none(),
+                "{spec} must not reach the registry"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_ranges_are_accepted_without_an_upstream_override() {
+        for spec in ["^1.2.3", "~1.2", "1.x", ">=1.0.0 <2.0.0", "^17 || ^18", "*"] {
+            let parsed = classify_specifier(spec).unwrap_or_else(|| panic!("{spec}"));
+            assert!(parsed.upstream.is_none());
+            assert_eq!(parsed.range, spec);
+        }
+    }
+
+    #[test]
+    fn an_alias_whose_key_equals_the_upstream_name_carries_no_manifest_key() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        writeln!(
+            file,
+            r#"{{
+  "dependencies": {{
+    "lodash": "npm:lodash@^4.17.0"
+  }}
+}}"#
+        )?;
+
+        let deps = PackageJsonParser::new().parse(file.path())?;
+        assert_eq!(deps[0].name, "lodash");
+        assert_eq!(deps[0].manifest_key, None);
 
         Ok(())
     }

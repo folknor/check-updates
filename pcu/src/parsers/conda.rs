@@ -75,10 +75,9 @@ impl<'a> YamlCursor<'a> {
 /// removed. `None` when the line is not a list item.
 fn list_item_body(line: &str) -> Option<&str> {
     let trimmed = line.trim();
-    let rest =
-        trimmed
-            .strip_prefix("- ")
-            .or_else(|| if trimmed == "-" { Some("") } else { None })?;
+    let rest = trimmed
+        .strip_prefix("- ")
+        .or_else(|| if trimmed == "-" { Some("") } else { None })?;
 
     let rest = strip_yaml_comment(rest).trim();
     let rest = rest

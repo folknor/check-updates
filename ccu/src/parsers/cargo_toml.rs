@@ -290,29 +290,21 @@ impl DependencyParser for CargoTomlParser {
             all_deps.extend(self.parse_deps_table(deps, path, &content, "workspace.dependencies"));
         }
 
-        // Parse [target.'cfg(...)'.dependencies]
+        // Parse [target.'cfg(...)'.{dependencies,dev-dependencies,build-dependencies}].
+        // All three are legal under a target and the updater resolves all three,
+        // so reading only two would leave platform-specific build deps unchecked.
         if let Some(target) = parsed.get("target").and_then(|v| v.as_table()) {
             for (target_name, target_value) in target {
                 if let Some(target_table) = target_value.as_table() {
-                    if let Some(deps) = target_table.get("dependencies").and_then(|v| v.as_table())
-                    {
-                        all_deps.extend(self.parse_deps_table(
-                            deps,
-                            path,
-                            &content,
-                            &format!("target.{target_name}.dependencies"),
-                        ));
-                    }
-                    if let Some(deps) = target_table
-                        .get("dev-dependencies")
-                        .and_then(|v| v.as_table())
-                    {
-                        all_deps.extend(self.parse_deps_table(
-                            deps,
-                            path,
-                            &content,
-                            &format!("target.{target_name}.dev-dependencies"),
-                        ));
+                    for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                        if let Some(deps) = target_table.get(kind).and_then(|v| v.as_table()) {
+                            all_deps.extend(self.parse_deps_table(
+                                deps,
+                                path,
+                                &content,
+                                &format!("target.{target_name}.{kind}"),
+                            ));
+                        }
                     }
                 }
             }
@@ -411,6 +403,51 @@ cc = "1.0"
         assert!(deps.iter().any(|d| d.name == "serde"));
         assert!(deps.iter().any(|d| d.name == "tempfile"));
         assert!(deps.iter().any(|d| d.name == "cc"));
+
+        Ok(())
+    }
+
+    /// All three dependency kinds under a `[target.'cfg(...)']` are read, and
+    /// each records the fully qualified section the updater resolves against.
+    #[test]
+    fn test_parse_target_sections_including_build_dependencies() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        writeln!(
+            file,
+            r#"
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(unix)'.dev-dependencies]
+nix = "0.27"
+
+[target.'cfg(windows)'.build-dependencies]
+cc = "1.0"
+"#
+        )?;
+
+        let parser = CargoTomlParser::new();
+        let deps = parser.parse(file.path())?;
+
+        assert_eq!(deps.len(), 3, "{deps:?}");
+
+        let libc = deps.iter().find(|d| d.name == "libc").unwrap();
+        assert_eq!(
+            libc.section.as_deref(),
+            Some("target.cfg(unix).dependencies")
+        );
+
+        let nix = deps.iter().find(|d| d.name == "nix").unwrap();
+        assert_eq!(
+            nix.section.as_deref(),
+            Some("target.cfg(unix).dev-dependencies")
+        );
+
+        let cc = deps.iter().find(|d| d.name == "cc").unwrap();
+        assert_eq!(
+            cc.section.as_deref(),
+            Some("target.cfg(windows).build-dependencies")
+        );
 
         Ok(())
     }

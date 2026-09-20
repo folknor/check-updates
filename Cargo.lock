@@ -188,6 +188,7 @@ version = "0.4.0"
 dependencies = [
  "colored",
  "serde",
+ "tempfile",
  "thiserror",
 ]
 

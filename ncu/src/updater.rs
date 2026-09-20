@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use check_updates_core::{DependencyCheck, UpdateSeverity, Version, VersionSpec};
+use check_updates_core::{DependencyCheck, UpdateSeverity, Version, VersionSpec, write_atomically};
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
@@ -142,7 +142,14 @@ impl FileUpdater {
         let mut content = original.clone();
 
         for (check, new_version) in updates {
-            let name = &check.dependency.name;
+            // The table key, which for an `npm:` alias is the local name
+            // (`"lodash4": "npm:lodash@^4.17.0"`) and not `dependency.name`,
+            // which by contract holds the upstream registry name.
+            let name = check
+                .dependency
+                .manifest_key
+                .as_deref()
+                .unwrap_or(&check.dependency.name);
             // Only the section the dependency was parsed from. A package can
             // sit in `dependencies` at `^1.0.0` and in `peerDependencies` at
             // `^1 || ^2`; the peer range is deliberately wide and is not ours
@@ -168,8 +175,11 @@ impl FileUpdater {
             return Ok(false);
         }
 
-        fs::write(file_path, &content)
-            .with_context(|| format!("Failed to write file: {}", file_path.display()))?;
+        // The splice above edits the original text so key order and
+        // indentation survive; only the final store goes through the
+        // crash-safe path.
+        write_atomically(file_path, content.as_bytes())
+            .with_context(|| format!("Failed to update file: {}", file_path.display()))?;
 
         Ok(true)
     }
@@ -181,7 +191,22 @@ impl FileUpdater {
 /// Everything outside the spliced value - key order, indentation, blank lines,
 /// trailing newline - is preserved byte for byte.
 fn replace_spec(content: &str, section: &str, name: &str, new_version: &str) -> Option<String> {
-    let (start, end) = find_value_span(content, section, name)?;
+    let (mut start, end) = find_value_span(content, section, name)?;
+
+    // An `npm:` alias value is `npm:<package>@<range>`; only the range is ours
+    // to rewrite. Overwriting the whole value would drop the alias and point
+    // the entry at a package that does not exist under the local key.
+    let value = &content[start..end];
+    if let Some(rest) = value.strip_prefix("npm:") {
+        let at = rest
+            .char_indices()
+            .skip(1)
+            .filter(|(_, c)| *c == '@')
+            .map(|(i, _)| i)
+            .last()?;
+        start += "npm:".len() + at + 1;
+    }
+
     if &content[start..end] == new_version {
         return None;
     }
@@ -499,6 +524,64 @@ mod tests {
             content.contains("\"react\": \"^17 || ^18\""),
             "peer range must be untouched: {content}"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn an_npm_alias_is_rewritten_under_its_local_key_and_keeps_the_alias() -> Result<()> {
+        let source = "{\n  \"dependencies\": {\n    \"lodash4\": \"npm:lodash@^4.17.0\"\n  }\n}\n";
+        let mut file = NamedTempFile::new()?;
+        write!(file, "{source}")?;
+        file.flush()?;
+        let path = file.path().to_path_buf();
+
+        let mut check = create_check(
+            "lodash",
+            "^4.17.0",
+            path.clone(),
+            "4.17.21",
+            UpdateSeverity::Patch,
+        );
+        check.dependency.manifest_key = Some("lodash4".to_string());
+
+        let result = FileUpdater::new().apply_updates(&[check], false, false)?;
+        assert_eq!(result.modified_files.len(), 1);
+
+        let content = fs::read_to_string(&path)?;
+        assert_eq!(
+            content, "{\n  \"dependencies\": {\n    \"lodash4\": \"npm:lodash@^4.17.21\"\n  }\n}\n",
+            "the alias prefix must survive: {content}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn an_atomic_write_leaves_no_temporary_file_behind() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("package.json");
+        fs::write(
+            &path,
+            "{\n  \"dependencies\": {\n    \"express\": \"^4.18.0\"\n  }\n}\n",
+        )?;
+
+        let checks = vec![create_check(
+            "express",
+            "^4.18.0",
+            path.clone(),
+            "4.18.2",
+            UpdateSeverity::Patch,
+        )];
+        FileUpdater::new().apply_updates(&checks, false, false)?;
+
+        assert!(fs::read_to_string(&path)?.contains("^4.18.2"));
+        let leftovers: Vec<_> = fs::read_dir(dir.path())?
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .filter(|n| n != "package.json")
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
 
         Ok(())
     }

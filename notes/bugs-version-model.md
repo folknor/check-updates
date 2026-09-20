@@ -42,32 +42,53 @@ Still true, by a different mechanism than filed: `split_release` now stops at
 `1` and the suffix `"!2.0.0"` is rejected as not a recognised pre-release, so
 the parse still errors and the release is still dropped silently.
 
-## VER-017 - A `Wildcard` spec has no base version, so it can never be updated
+## VER-017 - conda wildcards now resolve correctly and still cannot be written
 
-Found while reviewing the conda MatchSpec work, and it is the real mechanism
-behind a class of "silently never updates" reports that have been blamed on the
-updaters' string matching.
+Narrowed to its last part, and that part is now the only thing standing between
+a conda prefix pin and a working update.
 
-`Wildcard::base_version()` returns `None`. In `DependencyResolver::resolve`,
-`current` is `installed.or_else(|| version_spec.base_version())`, so a wildcard
-dependency in a project with no lock file entry has no `current` at all. It then
-gets `target = latest` with no spec and no severity, and `will_update` is false
-in every mode. No message is printed.
+Fixed in `core`: `VersionSpec::Wildcard` carries a `base: Version` (the prefix
+parsed and zero-filled), so `base_version()` returns `Some` and a wildcard
+dependency in a lock-less project gets a `current`, a severity and a rewritable
+spec. `with_version` preserves all three precisions, so `1.24.0.*` bumps to
+`1.26.3.*` instead of widening to `1.26.*`. `Wildcard::satisfies` compares
+parsed numeric fields by declared precision rather than string prefixes.
 
-This bites conda hardest (`python=3.9.*`, and pcu has no conda source of
-installed versions whatsoever, so *every* conda dependency is compared from its
-spec base version), but it applies equally to a pip `==1.24.*` in a lock-less
-project.
+Residue: `pcu/src/updater.rs::replace_in_conda` has no `==X.*` <-> `=X`
+mapping. It tries the literal spec, then a blanket `==` -> `=` substitution. For
+a conda line `numpy=1.24` the parser produces a `Wildcard` rendering as
+`==1.24.*`, which becomes `=1.24.*` and does not match the text `=1.24` in the
+file. So the dependency now computes a correct target, severity and spec - and
+is still silently not written. The fix is to strip the `.*` when the source line
+used conda's bare `=` prefix form.
 
-Two related defects in the same area:
+One form already works: a line spelled `python=3.9.*` matches after the
+`==`->`=` substitution.
 
-- `VersionSpec::with_version` for `Wildcard` caps the new prefix at two
-  segments, so `==1.24.0.*` bumped to 1.26 becomes `==1.26.*` - silently
-  widening the user's declared precision. Reachable from a requirements.txt
-  `==1.24.0.*`.
-- `replace_in_conda` has no `==X.*` <-> `=X` mapping, so even once the above is
-  fixed, a conda wildcard still will not rewrite. Dead code to add today, but it
-  is the third piece of the same fix.
+## VER-018 - `VersionSpec::parse` cannot fail, which makes `if let Ok` a no-op
+
+Found while fixing ncu's alias handling, and it changes how several other
+entries should be read.
+
+`VersionSpec::parse` ends with `Ok(VersionSpec::Complex(s.to_string()))`, so it
+never returns `Err` for unrecognised text. Every `if let Ok(spec) = ...` guard
+over it is therefore not a filter at all - it admits everything. In ncu this is
+why an open-ended set of npm protocol specifiers (`catalog:`, `patch:`,
+`portal:`, `exec:`, `user/repo`, dist-tags, tarball paths) all became `Complex`
+specs and were sent to the registry as package names.
+
+Two consequences worth recording:
+
+- A deny-list of "things that are not registry specs" is a losing race against
+  that fallback. ncu now uses an allow-list instead, and the same argument
+  applies anywhere else a parser guards on this function.
+- One narrow case *did* return `Err` until recently - a two-clause range whose
+  bound failed to parse, e.g. `>=1.0,<2.x`. That now degrades to `Complex` like
+  everything else, which is consistent but means the `Err` arm is dead.
+
+This intersects VER-008 and VER-013: the question those entries raise - whether
+an unmodellable spec should be a hard error or a silent `Complex` - is currently
+answered "always `Complex`, everywhere, with no way for a caller to tell".
 
 ## VER-007 - Cargo's single-`=` exact pin degrades to an unrewritable `Complex`
 
@@ -104,18 +125,6 @@ user; ncu argues the opposite direction for its ecosystem - that `Complex`
 lossily approximated into rewritable variants instead (DSC-007). Both agree the
 current silence is the defect.
 
-## VER-009 - Two contradictory definitions of "in range"
-
-Reported by core.
-
-`VersionSpec::satisfies` says `3.1.0` satisfies `>=2.28.0`.
-`DependencyResolver::calculate_in_range` then adds a special case restricting
-`Minimum`/`GreaterThan` to a single major. So `DependencyCheck.in_range` is not
-"the latest version satisfying the constraint" as `types.rs` documents it; it is
-that plus an undocumented semver heuristic applied to exactly two of the
-thirteen variants. The JSON field and the predicate the same crate exposes
-disagree. Either `satisfies` encodes the major-pinning or the resolver does not.
-
 ## VER-010 - `calculate_severity` compares fields independently
 
 Reported by core, ccu (as the downstream of VER-001), ncu.
@@ -138,30 +147,6 @@ else { None }
   classifier.
 
 Should be one lexicographic comparison of the triple plus a prerelease rule.
-
-## VER-011 - `with_version` changes the meaning of `Compatible` / `Tilde` constraints
-
-Reported by core.
-
-`with_version` preserves the variant but not the precision. `~=1.4` (PEP 440:
-lock major only) rewritten to `2.0.0` becomes `~=2.0.0`, which locks major
-*and* minor - because `satisfies` for `Compatible` decides which rule applies by
-counting dots in `v.original`. An update silently narrows the user's declared
-range. Same class of issue for `Tilde`. The `Wildcard` arm got this right by
-counting prefix segments; the others did not.
-
-## VER-012 - Wildcard check runs before the range check, and matches on raw strings
-
-Reported by core.
-
-`VersionSpec::parse` tests `s.contains('*')` *before* the comma/range check, so
-a compound spec containing a wildcard (`>=1.0,<2.*`) parses as a single
-`Wildcard` with prefix `">=1.0,<2"`. `satisfies` then does
-`version.original.starts_with(">=1.0,<2.")` - always false.
-
-Separately, `Wildcard::satisfies` matches on `version.original` (a raw string)
-rather than the parsed numeric fields, so `1.2.*` is sensitive to the exact
-textual form the registry returned (`1.2` vs `1.02`).
 
 ## VER-013 - `VersionSpec::parse` only models a two-clause range
 

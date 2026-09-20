@@ -13,32 +13,33 @@ Findings about what the tools tell the user and how they reach the network:
 registry clients, error surfacing, the `--json` envelope, progress reporting,
 global mode, and documentation that does not match the code.
 
-## RPT-001 - Every registry failure is reported as "not found"
+## RPT-002 - A failed fetch cannot be represented as a `DependencyCheck`
 
-Reported by ccu, pcu-runtime, ncu.
+Reported by ccu and pcu-runtime. The entry described a symptom; the cause is
+structural and was found independently by two fixers in different crates.
 
-`ccu/src/main.rs` prints every entry in `fetch_errors` under "Crates not found
-on crates.io:", but `get_package` pushes timeouts, 5xx, 429 rate limits and JSON
-parse failures into the same bucket. A rate-limited run tells the user their
-crates do not exist. pcu does the same under "Packages not found on PyPI:".
+`core::DependencyCheck.latest` is a non-`Option<Version>`, so there is no way to
+construct a check meaning "we could not reach the registry for this". That is
+why both tools do `if let Some(package_info) = ...` and drop the dependency
+entirely: the type leaves them no alternative.
 
-Task panics lose the package name entirely - recorded as the literal
-`"unknown"` in both `pcu/src/pypi.rs` and `ncu/src/npm.rs` - so the affected
-package disappears from the report behind a meaningless error line.
+Worked around, not fixed, in two places:
 
-## RPT-002 - A package whose fetch failed vanishes from the results
+- `ccu/src/main.rs` emits a separate `unchecked` array in the project JSON
+  envelope (`name`, `source_file`, `section`), deduped by name.
+- `pcu`'s global mode added `check_failed` to its own `GlobalCheck` and sets
+  `latest` to the installed version, with a doc comment warning consumers not to
+  read `has_update: false` on such a row as "up to date".
 
-Reported by ccu and pcu-runtime.
+The real fix is in `core`: either `latest: Option<Version>` or a `check_failed`
+flag on `DependencyCheck`, which `GlobalCheck` already has. Both workarounds
+should be retired when it lands - ccu's `unchecked` array collapses back into
+`checks` cleanly. The machine-readable name the entry asks for now exists as
+`FetchError::package`.
 
-Both tools do `if let Some(package_info) = package_infos.get(...)`, so a failed
-fetch drops the dependency from `checks` entirely: it is absent from the table
-*and* from the JSON `checks` array. In `--json` it survives only as a free-text
-string in `errors` with no machine-readable name, so a consumer cannot
-distinguish "up to date" from "we could not check".
-
-Related policy inconsistency in pcu: `get_packages` errors out hard (propagated
-by `?`) only when *all* packages fail. Partial and total failure are handled on
-opposite policies.
+Still true and unaddressed: pcu's `get_packages` errors out hard only when
+*every* package fails, so partial and total failure are handled on opposite
+policies.
 
 ## RPT-003 - `--json --update` discards the record of what was written
 
@@ -54,16 +55,6 @@ envelope.
 Related, from ncu: in `--json` project mode `checks` contains *every* resolved
 dependency including up-to-date ones, while the human path filters to updates.
 Neither behavior is documented in the READMEs.
-
-## RPT-004 - The progress bar reports the spawn index, not a completion count
-
-Reported by ccu and pcu-runtime.
-
-`callback(index + 1, total)` passes the enumeration position of the task that
-just finished. With a bounded semaphore (5 permits in ccu, 10 in pcu),
-completions arrive out of order, so `pb.set_position` jumps backwards (40 -> 7
--> 41) and the final position is whichever task finished last rather than
-`total`. Should be a shared `AtomicUsize::fetch_add`.
 
 ## RPT-005 - An unknown git-install check is not surfaced to the user
 
@@ -88,48 +79,6 @@ Two pieces of residue:
   a table full of honest "unknown" instead of a table full of wrong "up to
   date". Reading `GITHUB_TOKEN` / `GH_TOKEN` would make the feature usable.
 
-## RPT-006 - pcu global mode's "concurrent" work is strictly serial
-
-Reported by ccu and pcu-runtime. Narrowed: the ccu half is fixed.
-`check_path_updates` is async and fans out over `spawn_blocking`;
-`check_git_updates` runs concurrently under a 5-permit semaphore and reports
-completions through a shared `AtomicUsize`.
-
-The pcu half stands: both arms of `tokio::join!` in `run_global_mode` are
-`async { <blocking sync call> }`, and `get_python_info(true)` is called
-synchronously before the join, so three subprocess trees run strictly serially
-on the runtime thread while the comment says "concurrently".
-
-Note for whoever takes the ccu side further: there is no hard wall-clock
-timeout on `git fetch`, because the workspace enables tokio's
-`rt-multi-thread, macros, sync` only - no `time`, no `process`. The current
-mitigation is git's own knobs (`http.lowSpeedLimit`/`lowSpeedTime`,
-`GIT_TERMINAL_PROMPT=0`, `ssh -o BatchMode=yes -o ConnectTimeout=10`). A real
-timeout means adding those two tokio features.
-
-## RPT-007 - npm `latest` ignores the prerelease filter, and a total parse failure reads as "up to date"
-
-Reported by core and ncu.
-
-`ncu/src/npm.rs` filters `versions` by `include_prerelease` but takes `latest`
-from the `dist-tags.latest` field with no such filter, so a package whose
-`latest` tag points at a prerelease yields a `PackageInfo` whose `latest` is not
-in `versions`. The resolver uses `package_info.latest` for the force/fallback
-target, so ncu will recommend and, under `--force`, write a prerelease the user
-asked to exclude.
-
-The converse is also true: since `force_spec` and the fallback target both come
-from `latest`, `ncu -p -uf` will never upgrade *to* a prerelease. The `-p` flag
-only has an effect when a prerelease happens to fall inside the declared range.
-
-Separately, the fallback `.unwrap_or_else(|| Version::new(0, 0, 0))` turns "no
-parseable versions at all" into `latest = 0.0.0`, which compares below
-everything and renders as "All dependencies are up to date!" - a total failure
-presented as a clean result. ccu's equivalent path errors out.
-
-Note: `latest_stable` is populated by all three registry clients and read by
-nobody outside tests.
-
 ## RPT-008 - The `--json` help text promises stderr routing that does not exist
 
 Reported by ccu, pcu-runtime, ncu.
@@ -152,70 +101,52 @@ In `main.rs`, `GlobalCheckJson` flattens a `GlobalCheck` whose
 `git_hash`, `local_path` and `binaries` live under `.package.*`. A `jq` filter
 written from the README fails.
 
-## RPT-010 - pcu's subprocess failures are indistinguishable from "nothing found"
+## RPT-024 - `uv python list` has a JSON output mode
 
-Reported by pcu-runtime.
+Lateral finding from the RPT-012 work, and it makes that entry's whole class of
+defect avoidable.
 
-`uv_python.rs::discover_and_check` returns `Ok(vec![])` when `uv` is missing,
-when it exits non-zero, and when it legitimately manages no Pythons; stderr is
-discarded in all cases. Same in `global.rs::discover_uv_tools` /
-`discover_pipx_packages` (`_ => Ok(Vec::new())`) and
-`python.rs::fetch_latest_python_version` (`ok()?`). A broken or hung `uv` looks
-exactly like a clean machine.
+`uv python list --output-format json` exists on current uv. Every parsing bug
+that was filed under RPT-012 - first-row-per-series, system interpreters read as
+uv-managed, `parts[1]` taken unconditionally as a path - is a consequence of
+scraping the text table. Switching to the JSON form, with the text parser kept
+as a fallback for older uv, would remove the category.
 
-The `--json` envelope never carries these: `main.rs` does `Err(_) => Vec::new()`
-on `uv_python_checks` and passes `&fetch_errors` (PyPI only) as `errors`, and
-the empty-packages branch passes a literal `&[]`. So a `pcu -g --json` run where
-uv failed emits `"python_versions": []` with `"errors": []` - asserting there
-are no uv Pythons rather than admitting it does not know.
+Not done in the wave that found it, because learning the schema would have meant
+running uv repeatedly against the real machine.
 
-## RPT-011 - pcu's Python version reporting is wrong in several ways at once
+## RPT-026 - pcu project mode has the false-negative that global mode fixed
 
-Reported by pcu-runtime.
+`fetch_latest_python_versions` computes "latest in series" from every row in the
+`uv python list` output, including installed ones. A listing with no
+download-available rows - `--offline`, `UV_PYTHON_DOWNLOADS=never`, or a config
+setting - therefore reports the installed version as the latest, silently.
 
-- `detect_python_version` only reads stdout, but Python 2 prints `--version` to
-  stderr - so the `python` fallback that exists to catch Python 2 can never
-  succeed. It also inspects whatever `python3` is on `PATH`, not the project's
-  venv, while the header it feeds sits above a project's dependency table.
-- "Python 3.11.9 (latest)" is not what it says:
-  `fetch_latest_python_version` filters `uv python list` to the *current
-  major.minor series*, so pcu prints "(latest)" while 3.13 exists. With uv
-  absent, `latest` is `None` and the header degrades to a bare version with no
-  signal that the check did not run.
-- `uv python list` is executed two or three times per invocation.
-- `python.rs::fetch_all_latest_python_versions` is dead - no caller in the
-  workspace, kept alive by `pub`, and a verbatim duplicate of
-  `uv_python.rs::latest_versions_from_uv_list`.
+Global mode closed exactly this hole with a `NoDownloadBaseline` error, on the
+reasoning that a baseline computed from installed rows alone is meaningless
+rather than merely incomplete. Project mode needs the same check. It is a false
+negative, not an error, which is why it will not show up in any failure count.
 
-## RPT-012 - pcu's uv Python discovery misreads uv's output
+## RPT-027 - `FetchError` is triplicated across the three registry clients
 
-Reported by pcu-runtime.
+`FetchError`, `FetchErrorKind`, the `classify_*` helpers and `warn_unparsed` are
+roughly 120 identical lines in each of `ccu/src/cratesio.rs`,
+`pcu/src/pypi.rs` and `ncu/src/npm.rs`, written independently from one
+description.
 
-- Per-series "installed version" is the *first* row in uv's output, not the
-  newest installed (`seen_series` skips after the first hit). If uv emits
-  ascending, or emits a system interpreter before a uv-managed one, pcu reports
-  the older patch and tells you to `uv python install 3.11.14` when 3.11.14 is
-  already there.
-- System interpreters are reported as uv-managed: `/usr/bin/python3.12` is kept
-  (`is_installed` is just "line lacks `<download available>`"), filed under
-  "uv-managed Python installations:", and given a `uv python install X` command
-  that installs a *separate* uv copy rather than upgrading the system one.
-- The "latest available" baseline depends on an unstated uv default: the listing
-  only contains not-yet-installed builds because uv includes download-available
-  rows by default. If that changes, latest always equals installed and pcu
-  reports everything up to date - a silent false negative, not an error.
-- `path` is `parts[1]` unconditionally when installed, so any uv output variant
-  that puts something else in the second column stores garbage in a field
-  serialised into the JSON envelope.
+The same shape happened with the atomic write and was consolidated into
+`core::fs` after the three copies turned out to be byte-identical - agreement
+that was luck rather than correctness. This one should move to `core` too. Only
+`classify_transport` genuinely needs `reqwest` and can stay per crate.
 
-## RPT-013 - `-m` means two different things in pcu, and `-g -mf` ignores `-f`
+## RPT-025 - pcu silently drops non-CPython and freethreaded interpreters
 
-Reported by pcu-runtime.
+Lateral finding from the RPT-012 work.
 
-In project mode `-m` is "patch + minor" (a severity filter). In global mode
-(`main.rs` 157-164) it is "highest version with the same major" - a range
-restriction. And `if args.minor` is checked before force, so `pcu -g -mf`
-silently ignores `-f`.
+`parse_uv_python_list` drops pypy, graalpy and every `+freethreaded` build
+without a word. A user whose only 3.13 is freethreaded gets no row and no
+explanation - the same silent-omission class as RPT-010, which was about
+subprocess failures being indistinguishable from a clean machine.
 
 ## RPT-020 - Workspace manifest warnings on every check run
 
@@ -225,25 +156,6 @@ Lateral finding, reported independently by four hunters in this wave.
 `Cargo.toml`, and `package.readme` as inferable in all three binary crates.
 Cosmetic, but they appear in the output of every `brokkr check` and so add
 constant noise to every future wave's diagnostics.
-
-## RPT-016 - Both registry clients fetch far more than they need, with no caching
-
-Reported by ccu and ncu as lateral findings.
-
-- `ccu/src/cratesio.rs` fetches the full `/crates/{name}` endpoint (entire
-  version history, every dependency) for every crate when only versions and
-  dates are needed; the sparse index or `/versions` would be far lighter.
-- `ncu/src/npm.rs` fetches the full registry packument - megabytes for popular
-  packages - when the abbreviated document would do for everything except the
-  `time` map.
-- Neither caches or issues conditional requests (no ETag / If-None-Match).
-
-## RPT-017 - ncu interpolates scoped names into the URL unencoded
-
-Reported by ncu.
-
-`{registry}/@scope/name` works against registry.npmjs.org but is not the
-documented form (`@scope%2Fname`) and will break against stricter mirrors.
 
 ## RPT-018 - Dead fields and leftover scaffolding advertising behavior that does not exist
 
@@ -261,41 +173,6 @@ Reported by ncu, pcu-runtime, core.
   yanked - defensible.)
 - `core::VersionSpec::max_major()` was unused and inconsistent; it has since
   been deleted, with the reasoning recorded at the site.
-
-## RPT-023 - `core::output::render_deduped` does not dedup
-
-Found while wiring ncu's per-declaration reporting.
-
-The function only renders. Each CLI hand-rolls its own dedup before calling it -
-ccu and pcu did, ncu did not, which is why making ncu report per declaration
-would have printed one identical row per workspace member until a display-level
-dedup on `(name, target)` was added at that call site.
-
-Either the name should change, or the deduping should move inside it so the
-three callers stop reimplementing it differently. The current state invites the
-next caller to make exactly the same mistake.
-
-## RPT-022 - Every update-table row can end in trailing whitespace
-
-Lateral finding from the table-width work, present in all four renderers
-(`core/src/output.rs` and the three CLI ones).
-
-The row format ends `... -> {:<to_w$}  {}` with severity as the last field, and
-severity is `String::new()` when `update_severity()` returns `None`. The
-latest-version column is padded to width and then followed by two literal
-spaces, so such a row ends in pure trailing blanks. Cosmetic, but it annoys
-anyone diffing or copy-pasting output.
-
-Two smaller shape issues found alongside it:
-
-- ccu's `max_latest` is computed with `filter_map(latest_version)` while the row
-  printer falls back to `String::new()`, so a registry row with
-  `has_update == true` and `latest_version == None` prints an empty but fully
-  padded column. Unreachable today, but nothing in the types enforces that
-  `has_update` implies `Some`.
-- ccu's git-hash column is unpadded, correct only because hash and placeholder
-  are both 7 chars by construction. A shorter hash makes the status column
-  after it ragged.
 
 ## RPT-021 - `GitStatus::commits_behind` is populated from `ahead_by`
 

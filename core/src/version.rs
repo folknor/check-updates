@@ -382,14 +382,97 @@ pub enum VersionSpec {
     Tilde(Version),
     /// ~=1.2.3 (compatible release - Python)
     Compatible(Version),
-    /// ==1.2.*
-    Wildcard { prefix: String, pattern: String },
+    /// `==1.2.*` - a prefix match.
+    ///
+    /// `prefix` is the numeric prefix with no operator and no trailing `.*`
+    /// (`"1.2"`); its segment count is the declared precision and is what
+    /// decides which fields [`VersionSpec::satisfies`] compares. `pattern` is
+    /// the raw text the spec was parsed from, kept for diagnostics only - no
+    /// behaviour reads it. `base` is `prefix` parsed as a version, zero-filled
+    /// (`1.2` -> `1.2.0`), so a wildcard has a base version like every other
+    /// bounded variant; without it a wildcard dependency in a lock-less project
+    /// had no `current` at all and could never be reported as updatable.
+    Wildcard {
+        prefix: String,
+        pattern: String,
+        base: Version,
+    },
     /// !=1.2.3
     NotEqual(Version),
     /// Complex constraint we store as raw string
     Complex(String),
     /// Any version (no constraint or *)
     Any,
+}
+
+/// Parse a `*`-bearing specifier into a [`VersionSpec::Wildcard`].
+///
+/// Returns `None` when the text left of the `*` is not a numeric prefix - a
+/// `~=1.2.*` or a `>=1.2.*` is a constraint this type does not model, and the
+/// caller keeps it as `Complex` rather than inventing a prefix out of the
+/// operator characters.
+fn parse_wildcard(s: &str) -> Option<VersionSpec> {
+    let body = s
+        .strip_prefix("==")
+        .or_else(|| s.strip_prefix('='))
+        .unwrap_or(s)
+        .trim();
+    let prefix = body.trim_end_matches('*').trim_end_matches('.');
+    if prefix.is_empty() {
+        return None;
+    }
+    let base = Version::from_str(prefix).ok()?;
+    Some(VersionSpec::Wildcard {
+        prefix: prefix.to_string(),
+        pattern: s.to_string(),
+        base,
+    })
+}
+
+/// How many release segments the user actually wrote, 1 to 3.
+///
+/// `~=1.4` and `~=1.4.0` are different constraints in PEP 440, and `~1.2` and
+/// `~1.2.3` are different constraints in Cargo, so the declared precision is
+/// part of the spec's meaning and has to survive a rewrite. It is read from the
+/// release core of `original` rather than by counting dots in the whole string,
+/// which miscounts `1.2.post1` and `1.2+local`.
+fn declared_precision(v: &Version) -> usize {
+    let (core, _) = split_release(v.original.trim());
+    if core.is_empty() {
+        3
+    } else {
+        core.split('.').count().clamp(1, 3)
+    }
+}
+
+/// Re-render `v` at `precision` release segments.
+///
+/// Truncating drops any pre-release and local segment, since `1.2.3-rc1`
+/// truncated to two segments is `1.2` and nothing else is meaningful. A
+/// precision of 3 or more pads to a full triple - `1.26` rendered at three
+/// segments is `1.26.0` - unless the version carries a pre-release or local
+/// segment, in which case its own text is kept verbatim.
+fn with_precision(v: &Version, precision: usize) -> Version {
+    match precision {
+        1 => Version {
+            major: v.major,
+            minor: 0,
+            patch: 0,
+            pre_release: None,
+            local: None,
+            original: format!("{}", v.major),
+        },
+        2 => Version {
+            major: v.major,
+            minor: v.minor,
+            patch: 0,
+            pre_release: None,
+            local: None,
+            original: format!("{}.{}", v.major, v.minor),
+        },
+        _ if v.pre_release.is_some() || v.local.is_some() => v.clone(),
+        _ => Version::new(v.major, v.minor, v.patch),
+    }
 }
 
 impl VersionSpec {
@@ -417,21 +500,12 @@ impl VersionSpec {
             return Ok(VersionSpec::Tilde(version));
         }
 
-        // Handle wildcard
-        if s.contains('*') {
-            if let Some(prefix) = s.strip_prefix("==") {
-                return Ok(VersionSpec::Wildcard {
-                    prefix: prefix.replace(".*", "").replace("*", ""),
-                    pattern: s.to_string(),
-                });
-            }
-            return Ok(VersionSpec::Wildcard {
-                prefix: s.replace(".*", "").replace("*", ""),
-                pattern: s.to_string(),
-            });
-        }
-
-        // Handle range (>=X,<Y)
+        // Handle range (>=X,<Y). This runs *before* the wildcard check: a
+        // compound spec that happens to contain a `*` (`>=1.0,<2.*`) is a range
+        // first and must not be swallowed whole as a single wildcard with the
+        // nonsense prefix `">=1.0,<2"`. A clause that will not parse leaves the
+        // whole thing `Complex` rather than raising - a multi-clause specifier
+        // set is a constraint we cannot model, not malformed input.
         if s.contains(',') {
             let parts: Vec<&str> = s.split(',').collect();
             if parts.len() == 2 {
@@ -440,14 +514,19 @@ impl VersionSpec {
 
                 if let (Some(min_str), Some(max_str)) =
                     (min_part.strip_prefix(">="), max_part.strip_prefix('<'))
+                    && let (Ok(min), Ok(max)) =
+                        (Version::from_str(min_str), Version::from_str(max_str))
                 {
-                    let min = Version::from_str(min_str)?;
-                    let max = Version::from_str(max_str)?;
                     return Ok(VersionSpec::Range { min, max });
                 }
             }
             // Complex constraint
             return Ok(VersionSpec::Complex(s.to_string()));
+        }
+
+        // Handle wildcard
+        if s.contains('*') {
+            return Ok(parse_wildcard(s).unwrap_or_else(|| VersionSpec::Complex(s.to_string())));
         }
 
         // Handle simple operators
@@ -515,23 +594,42 @@ impl VersionSpec {
                 }
             }
             VersionSpec::Tilde(v) => {
-                version >= v && version.major == v.major && version.minor == v.minor
+                // Cargo: ~1 means >=1.0.0, <2.0.0 (lock major only)
+                //        ~1.2 and ~1.2.3 mean <1.3.0 (lock major+minor)
+                if version < v {
+                    return false;
+                }
+                match declared_precision(v) {
+                    1 => version.major == v.major,
+                    _ => version.major == v.major && version.minor == v.minor,
+                }
             }
             VersionSpec::Compatible(v) => {
                 // PEP 440: ~=X.Y means >=X.Y, <(X+1).0.0 (lock major only)
                 //          ~=X.Y.Z means >=X.Y.Z, <X.(Y+1).0 (lock major+minor)
-                let dot_count = v.original.chars().filter(|c| *c == '.').count();
-                if dot_count < 2 {
-                    // ~=X.Y form: only lock on major
-                    version >= v && version.major == v.major
-                } else {
-                    // ~=X.Y.Z form: lock on major+minor
-                    version >= v && version.major == v.major && version.minor == v.minor
+                if version < v {
+                    return false;
+                }
+                match declared_precision(v) {
+                    1 | 2 => version.major == v.major,
+                    _ => version.major == v.major && version.minor == v.minor,
                 }
             }
-            VersionSpec::Wildcard { prefix, .. } => {
-                // Must match prefix followed by a dot (or end), so 1.2.* doesn't match 1.20.x
-                version.original.starts_with(&format!("{prefix}.")) || version.original == *prefix
+            VersionSpec::Wildcard { prefix, base, .. } => {
+                // Compare parsed numeric fields, never the raw `original` text:
+                // a prefix match on strings makes `1.2.*` depend on the exact
+                // spelling the registry returned (`1.2` vs `1.02` vs `1.2.0`).
+                // The declared precision decides how many fields are compared,
+                // so `1.2.*` matches 1.2.x and never 1.20.x.
+                match prefix.split('.').count() {
+                    0 | 1 => version.major == base.major,
+                    2 => version.major == base.major && version.minor == base.minor,
+                    _ => {
+                        version.major == base.major
+                            && version.minor == base.minor
+                            && version.patch == base.patch
+                    }
+                }
             }
             VersionSpec::NotEqual(v) => version != v,
             VersionSpec::Complex(_) => false, // Can't evaluate complex constraints; don't claim in-range
@@ -551,7 +649,15 @@ impl VersionSpec {
             | VersionSpec::Compatible(v)
             | VersionSpec::NotEqual(v) => Some(v),
             VersionSpec::Range { min, .. } => Some(min),
-            VersionSpec::Wildcard { .. } | VersionSpec::Complex(_) | VersionSpec::Any => None,
+            // A wildcard's base is the zero-filled prefix. It used to return
+            // `None`, which left `DependencyResolver::resolve` with no `current`
+            // for any wildcard dependency lacking a lock entry: target became
+            // latest with no spec and no severity, and `will_update` was false
+            // in every mode, silently. Conda felt it hardest (pcu has no source
+            // of installed conda versions at all) but a lock-less `==1.24.*`
+            // had the same fate.
+            VersionSpec::Wildcard { base, .. } => Some(base),
+            VersionSpec::Complex(_) | VersionSpec::Any => None,
         }
     }
 
@@ -632,19 +738,29 @@ impl VersionSpec {
                 }
             }
             VersionSpec::Caret(_) => VersionSpec::Caret(new_version.clone()),
-            VersionSpec::Tilde(_) => VersionSpec::Tilde(new_version.clone()),
-            VersionSpec::Compatible(_) => VersionSpec::Compatible(new_version.clone()),
-            VersionSpec::Wildcard { prefix, pattern } => {
-                // Preserve the original wildcard precision:
-                // "1.*" (1 segment) → "2.*", "1.2.*" (2 segments) → "1.3.*"
-                let segments = prefix.split('.').count();
-                let new_prefix = match segments {
-                    0 | 1 => format!("{}", new_version.major),
-                    _ => format!("{}.{}", new_version.major, new_version.minor),
-                };
+            // `Tilde` and `Compatible` mean different things at different
+            // precisions, so the rewrite has to be rendered at the precision the
+            // user declared. Writing the full triple turned `~=1.4` (lock major)
+            // into `~=2.0.0` (lock major and minor), silently narrowing the
+            // declared range.
+            VersionSpec::Tilde(old) => {
+                VersionSpec::Tilde(with_precision(new_version, declared_precision(old)))
+            }
+            VersionSpec::Compatible(old) => {
+                VersionSpec::Compatible(with_precision(new_version, declared_precision(old)))
+            }
+            VersionSpec::Wildcard {
+                prefix, pattern, ..
+            } => {
+                // Preserve the original wildcard precision exactly:
+                // "1.*" -> "2.*", "1.2.*" -> "1.3.*", "1.24.0.*" -> "1.26.0.*".
+                // Capping at two segments widened the user's declared precision.
+                let segments = prefix.split('.').count().clamp(1, 3);
+                let base = with_precision(new_version, segments);
                 VersionSpec::Wildcard {
-                    prefix: new_prefix,
+                    prefix: base.original.clone(),
                     pattern: pattern.clone(),
+                    base,
                 }
             }
             VersionSpec::NotEqual(_) => VersionSpec::NotEqual(new_version.clone()),
@@ -890,6 +1006,83 @@ mod tests {
             None
         );
         assert_eq!(VersionSpec::parse("*").unwrap().version_string(), None);
+    }
+
+    // A wildcard has a base version, so a wildcard dependency with no lock
+    // entry still has a `current` to compare against.
+    #[test]
+    fn wildcard_has_a_base_version() {
+        let spec = VersionSpec::parse("==1.24.*").unwrap();
+        let base = spec.base_version().expect("wildcard base");
+        assert_eq!((base.major, base.minor, base.patch), (1, 24, 0));
+
+        let spec = VersionSpec::parse("3.9.*").unwrap();
+        let base = spec.base_version().expect("wildcard base");
+        assert_eq!((base.major, base.minor, base.patch), (3, 9, 0));
+    }
+
+    // Prefix matching is on parsed fields, not on registry text.
+    #[test]
+    fn wildcard_matches_numeric_fields() {
+        let spec = VersionSpec::parse("==1.2.*").unwrap();
+        assert!(spec.satisfies(&Version::from_str("1.2").unwrap()));
+        assert!(spec.satisfies(&Version::from_str("1.2.9").unwrap()));
+        assert!(!spec.satisfies(&Version::from_str("1.20.0").unwrap()));
+        assert!(!spec.satisfies(&Version::from_str("1.3.0").unwrap()));
+
+        let spec = VersionSpec::parse("==1.*").unwrap();
+        assert!(spec.satisfies(&Version::from_str("1.9.9").unwrap()));
+        assert!(!spec.satisfies(&Version::from_str("2.0.0").unwrap()));
+    }
+
+    // A rewrite must not widen or narrow the precision the user declared.
+    #[test]
+    fn rewrites_preserve_declared_precision() {
+        let bump = |spec: &str, to: &str| {
+            VersionSpec::parse(spec)
+                .unwrap()
+                .with_version(&Version::from_str(to).unwrap())
+                .to_string()
+        };
+
+        assert_eq!(bump("==1.24.0.*", "1.26.3"), "==1.26.3.*");
+        assert_eq!(bump("==1.24.*", "1.26.3"), "==1.26.*");
+        assert_eq!(bump("==1.*", "2.6.3"), "==2.*");
+        assert_eq!(bump("~=1.4", "2.0.0"), "~=2.0");
+        assert_eq!(bump("~=1.4.2", "2.0.0"), "~=2.0.0");
+        assert_eq!(bump("~1.2", "2.3.4"), "~2.3");
+        assert_eq!(bump("~1.2.3", "2.3.4"), "~2.3.4");
+    }
+
+    // `~=X.Y` locks the major only; `~=X.Y.Z` locks major and minor. The rule
+    // is chosen by declared precision, and must survive a rewrite.
+    #[test]
+    fn compatible_precision_survives_a_rewrite() {
+        let spec = VersionSpec::parse("~=1.4").unwrap();
+        assert!(spec.satisfies(&Version::from_str("1.9.0").unwrap()));
+
+        let rewritten = spec.with_version(&Version::from_str("2.0.0").unwrap());
+        assert!(
+            rewritten.satisfies(&Version::from_str("2.9.0").unwrap()),
+            "rewriting ~=1.4 must not start locking the minor"
+        );
+
+        let narrow = VersionSpec::parse("~=1.4.2").unwrap();
+        assert!(!narrow.satisfies(&Version::from_str("1.9.0").unwrap()));
+    }
+
+    // A compound spec that happens to contain a `*` is a range first.
+    #[test]
+    fn a_wildcard_inside_a_compound_spec_is_not_one_wildcard() {
+        let spec = VersionSpec::parse(">=1.0,<2.*").unwrap();
+        assert!(
+            matches!(spec, VersionSpec::Complex(_)),
+            "got {spec:?}, expected Complex"
+        );
+        assert!(matches!(
+            VersionSpec::parse(">=1.0,<2.0").unwrap(),
+            VersionSpec::Range { .. }
+        ));
     }
 
     #[test]

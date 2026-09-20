@@ -13,3 +13,6 @@ workspace = true
 colored = "3"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+
+[dev-dependencies]
+tempfile.workspace = true

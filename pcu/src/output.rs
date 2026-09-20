@@ -140,7 +140,12 @@ impl GlobalTableRenderer {
                 None => String::new(),
             };
 
-            println!(
+            // Trimmed on the right: the severity is the last column and is
+            // empty when `update_severity()` returns `None`, which would leave
+            // the row ending in the latest-version padding plus the separator -
+            // trailing blanks that show up in diffs and copy-pasted output.
+            // The columns are all to the left, so trimming cannot disturb them.
+            let row = format!(
                 "  {:<name_w$}  {:>inst_w$} → {:<to_w$}  {}",
                 check.package.name,
                 check.package.installed_version.to_string(),
@@ -150,6 +155,7 @@ impl GlobalTableRenderer {
                 inst_w = max_installed,
                 to_w = max_latest,
             );
+            println!("{}", row.trim_end());
         }
     }
 }

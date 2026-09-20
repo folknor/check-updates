@@ -18,11 +18,13 @@ pub struct Args {
     #[arg(short, long)]
     pub update: bool,
 
-    /// Include minor updates (use with -u as -um)
+    /// Limit to patch and minor updates (use with -u as -um; in global mode it
+    /// hides major updates from the report)
     #[arg(short, long)]
     pub minor: bool,
 
-    /// Force update all to absolute latest (use with -u as -uf)
+    /// Force update all to absolute latest (use with -u as -uf; in global mode
+    /// it lifts the -m filter)
     #[arg(short, long)]
     pub force: bool,
 
