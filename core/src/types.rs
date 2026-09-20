@@ -88,6 +88,26 @@ impl DependencyCheck {
         self.target.is_some()
     }
 
+    /// Check whether an update run with the given severity filter will actually
+    /// rewrite this dependency. Mirrors the filtering in each crate's `FileUpdater`,
+    /// so callers can display exactly what gets written.
+    ///
+    /// - `include_minor`: false = patch only, true = patch + minor
+    /// - `force`: true = all severities, written at the absolute latest version
+    pub fn will_update(&self, include_minor: bool, force: bool) -> bool {
+        let spec = if force {
+            self.force_spec.as_ref()
+        } else {
+            match self.severity {
+                Some(UpdateSeverity::Patch) => self.target_spec.as_ref(),
+                Some(UpdateSeverity::Minor) if include_minor => self.target_spec.as_ref(),
+                _ => None,
+            }
+        };
+
+        spec.is_some_and(VersionSpec::is_rewritable)
+    }
+
     /// Check if there's a newer version available beyond the target
     pub fn has_newer_available(&self) -> bool {
         match &self.target {
@@ -101,5 +121,62 @@ impl DependencyCheck {
         self.installed
             .as_ref()
             .or_else(|| self.dependency.version_spec.base_version())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(severity: UpdateSeverity) -> DependencyCheck {
+        let target = Version::new(7, 0, 0);
+        DependencyCheck {
+            dependency: Dependency {
+                name: "dirs".to_string(),
+                version_spec: VersionSpec::Caret(Version::new(6, 0, 0)),
+                source_file: PathBuf::from("Cargo.toml"),
+                line_number: 1,
+                original_line: "dirs = \"6.0.0\"".to_string(),
+                manifest_key: None,
+            },
+            installed: Some(Version::new(6, 0, 0)),
+            in_range: None,
+            latest: target.clone(),
+            target: Some(target.clone()),
+            target_spec: Some(VersionSpec::Caret(target.clone())),
+            severity: Some(severity),
+            force_spec: Some(VersionSpec::Caret(target)),
+            installed_released_at: None,
+            target_released_at: None,
+            latest_released_at: None,
+        }
+    }
+
+    #[test]
+    fn major_update_is_skipped_unless_forced() {
+        let major = check(UpdateSeverity::Major);
+        assert!(!major.will_update(false, false));
+        assert!(!major.will_update(true, false));
+        assert!(major.will_update(false, true));
+    }
+
+    #[test]
+    fn minor_update_needs_include_minor() {
+        let minor = check(UpdateSeverity::Minor);
+        assert!(!minor.will_update(false, false));
+        assert!(minor.will_update(true, false));
+    }
+
+    #[test]
+    fn patch_update_always_applies() {
+        let patch = check(UpdateSeverity::Patch);
+        assert!(patch.will_update(false, false));
+    }
+
+    #[test]
+    fn unrewritable_spec_never_updates() {
+        let mut major = check(UpdateSeverity::Major);
+        major.force_spec = Some(VersionSpec::Any);
+        assert!(!major.will_update(true, true));
     }
 }

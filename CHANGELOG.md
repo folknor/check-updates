@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- `-u` and `-um` no longer list updates they skipped. The "Dependencies updated:" table was rendered from every outdated dependency regardless of the severity filter, so `ccu -um` would report a MAJOR bump as applied while the updater correctly left the file untouched. The table now shows only what is actually written, prints "No dependencies updated." when the filter excludes everything, and reports how many updates were skipped with a pointer to `-uf`. Applies to `ccu`, `pcu`, and `ncu`.
+
 ## [0.4.0] - 2026-07-17
 
 ### Added

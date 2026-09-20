@@ -286,21 +286,44 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         return Ok(());
     }
 
+    // In update mode only list what the severity filter will actually write,
+    // so -u/-um never claim to have applied a major bump they skipped.
+    let to_render: Vec<&DependencyCheck> = checks
+        .iter()
+        .filter(|c| c.has_update() && (!args.update || c.will_update(args.minor, args.force)))
+        .collect();
+
+    // Updates that exist but fall outside the requested severity filter
+    let skipped: HashSet<&str> = checks
+        .iter()
+        .filter(|c| c.has_update() && !c.will_update(args.minor, args.force))
+        .map(|c| c.dependency.name.as_str())
+        .collect();
+    let skipped = skipped.len();
+
     // Render output
     let renderer = TableRenderer::new(true);
-    let header = if args.update {
-        "Dependencies updated:"
+    if args.update && to_render.is_empty() {
+        println!("No dependencies updated.");
     } else {
-        "Outdated dependencies:"
-    };
-    renderer.render(&checks, header);
+        let header = if args.update {
+            "Dependencies updated:"
+        } else {
+            "Outdated dependencies:"
+        };
+        renderer.render_deduped(&to_render, header);
+    }
 
     // Apply updates if requested
     if args.update {
         let updater = FileUpdater::new();
         let result = updater.apply_updates(&checks, args.minor, args.force)?;
         result.print_summary();
-    } else if checks.iter().any(check_updates_core::DependencyCheck::has_update) {
+
+        if skipped > 0 && !args.force {
+            println!("{skipped} update(s) outside the selected severity were skipped. Run -uf to force upgrade all.");
+        }
+    } else if !to_render.is_empty() {
         println!();
         println!("Run -u to upgrade patch, -um to upgrade patch+minors, and -uf to force upgrade all.");
     }

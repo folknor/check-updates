@@ -372,6 +372,11 @@ async fn run_project_mode(args: &Args) -> Result<()> {
             if !c.has_update() {
                 return false;
             }
+            // In update mode only list what the severity filter will actually write,
+            // so -u/-um never claim to have applied a major bump they skipped.
+            if args.update && !c.will_update(args.minor, args.force) {
+                return false;
+            }
             let key = format!(
                 "{}:{}",
                 c.dependency.name,
@@ -391,13 +396,25 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         return Ok(());
     }
 
+    // Updates that exist but fall outside the requested severity filter
+    let skipped: HashSet<&str> = checks
+        .iter()
+        .filter(|c| c.has_update() && !c.will_update(args.minor, args.force))
+        .map(|c| c.dependency.name.as_str())
+        .collect();
+    let skipped = skipped.len();
+
     let renderer = TableRenderer::new(true);
-    let header = if args.update {
-        "Dependencies updated:"
+    if args.update && deduplicated.is_empty() {
+        println!("No dependencies updated.");
     } else {
-        "Outdated dependencies:"
-    };
-    renderer.render_deduped(&deduplicated, header);
+        let header = if args.update {
+            "Dependencies updated:"
+        } else {
+            "Outdated dependencies:"
+        };
+        renderer.render_deduped(&deduplicated, header);
+    }
 
     // 7. If --update, apply updates based on severity filter
     if args.update {
@@ -413,6 +430,13 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         }
 
         result.print_summary();
+
+        if skipped > 0 && !args.force {
+            println!(
+                "{skipped} update(s) outside the selected severity were skipped. Run {} to force upgrade all.",
+                "-uf".cyan()
+            );
+        }
     } else if !deduplicated.is_empty() {
         println!();
         println!(
