@@ -937,4 +937,32 @@ version = "4.12.2"
             "4.12.2"
         );
     }
+
+    #[test]
+    fn a_dotted_lock_entry_keys_as_its_pep_503_name() {
+        // Lock files write the distribution name in whatever form the resolver
+        // recorded. `zope.interface` and `zope-interface` are the same
+        // distribution and must land on the key the manifest parser produces,
+        // or the dependency reports as uninstalled.
+        let lock_content = r#"
+[[package]]
+name = "zope.interface"
+version = "6.1"
+
+[[package]]
+name = "ruamel.yaml.clib"
+version = "0.2.8"
+"#;
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(lock_content.as_bytes()).unwrap();
+
+        let versions = LockfileParser::new()
+            .parse_toml_lock(temp_file.path())
+            .unwrap();
+        assert_eq!(versions.get("zope-interface").unwrap().to_string(), "6.1");
+        assert_eq!(
+            versions.get("ruamel-yaml-clib").unwrap().to_string(),
+            "0.2.8"
+        );
+    }
 }

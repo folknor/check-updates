@@ -72,6 +72,12 @@ fn print_fetch_failures(failures: &[FetchError]) {
 /// is untouched, so `will_update` and `update_blocker` answer exactly as before
 /// and `apply_updates` still sees the original checks.
 fn retarget_forced(check: &DependencyCheck) -> DependencyCheck {
+    // Nothing to retarget onto: a failed lookup has no latest version, and
+    // `latest` holds a placeholder that must never become a displayed target.
+    if check.check_failed {
+        return check.clone();
+    }
+
     let mut forced = check.clone();
     forced.severity =
         DependencyResolver::calculate_severity(check.current_version(), Some(&check.latest));
@@ -326,11 +332,15 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     let mut checks = Vec::new();
 
     for dep in &all_deps {
-        if let Some(info) = package_infos.get(&dep.name) {
-            let installed = installed_versions.get(&dep.name);
-            let check = resolver.resolve(dep, info, installed);
-            checks.push(check);
-        }
+        let installed = installed_versions.get(&dep.name);
+        // A package the registry never answered for keeps a check of its own
+        // rather than being dropped: the run was asked about it, and silence
+        // about it reads as "up to date" in both the table and the JSON.
+        let check = match package_infos.get(&dep.name) {
+            Some(info) => resolver.resolve(dep, info, installed),
+            None => DependencyCheck::unchecked(dep, installed),
+        };
+        checks.push(check);
     }
 
     if args.json {
@@ -360,7 +370,16 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     let mut seen_rows: HashSet<String> = HashSet::new();
     let to_render: Vec<&DependencyCheck> = display_checks
         .iter()
-        .filter(|c| c.has_update() && (!args.update || c.will_update(args.minor, args.force)))
+        // A package that could not be checked is listed outside update mode,
+        // where the table is a report of what the run found. Under `-u` the
+        // header says "Dependencies updated:", which such a row would
+        // contradict; it surfaces in the fetch-failure list instead.
+        .filter(|c| {
+            if c.check_failed {
+                return !args.update;
+            }
+            c.has_update() && (!args.update || c.will_update(args.minor, args.force))
+        })
         .filter(|c| {
             let key = format!(
                 "{}:{}",
@@ -420,7 +439,9 @@ async fn run_project_mode(args: &Args) -> Result<()> {
                 "{blocked} update(s) cannot be written by -u even with --force; run without -u to see them and why."
             );
         }
-    } else if !to_render.is_empty() {
+    } else if to_render.iter().any(|c| !c.check_failed) {
+        // Rows that could not be checked are not updates, so a table holding
+        // only those must not invite the user to run `-u` on them.
         println!();
         println!(
             "Run -u to upgrade patch, -um to upgrade patch+minors, and -uf to force upgrade all."

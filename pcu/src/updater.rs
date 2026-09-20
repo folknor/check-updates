@@ -353,29 +353,85 @@ fn is_name_char(c: char) -> bool {
 
 /// Find the byte offset just past an occurrence of `name` (and any `[extras]`
 /// suffix) that is a whole token - not a substring of a longer package name.
+///
+/// `name` is the key the parsers record, which for every pip-flavoured source
+/// is the PEP 503 *normalized* form, not the spelling in the file:
+/// `typing_extensions>=4.0` is keyed `typing-extensions`, and
+/// `zope.interface>=5.0` is keyed `zope-interface`. A literal substring search
+/// therefore fails to anchor on exactly those lines, and the caller then leaves
+/// the line alone while the user was told an update was available. So the
+/// comparison is made on normalized tokens rather than on raw bytes.
+///
+/// Normalization is *not* length-preserving (`foo--bar` folds to `foo-bar`), so
+/// the scan walks the original `body` and normalizes only the extracted token.
+/// Every offset returned indexes the original string.
+///
+/// This widens what counts as a match; it does not loosen the anchor. The match
+/// is still whole-token - `requests` never anchors inside `requests-oauthlib` -
+/// and a token that does not fold to the target key is still a miss, so the
+/// function stays fail-closed.
 fn name_anchor_end(body: &str, name: &str) -> Option<usize> {
     if name.is_empty() {
         return None;
     }
-    // `to_ascii_lowercase` preserves byte length, so offsets stay valid.
-    let haystack = body.to_ascii_lowercase();
-    let needle = name.to_ascii_lowercase();
-    let mut from = 0;
+    let target = crate::parsers::pep508::normalize_name(name);
+    if target.is_empty() {
+        return None;
+    }
 
-    while let Some(rel) = haystack[from..].find(&needle) {
-        let start = from + rel;
-        let end = start + needle.len();
-        let before_ok = !body[..start].chars().next_back().is_some_and(is_name_char);
-        let after = &body[end..];
-        let after_ok = !after.chars().next().is_some_and(is_name_char);
+    let mut idx = 0usize;
+    let mut prev_was_name_char = false;
 
-        if before_ok && after_ok {
+    while idx < body.len() {
+        let ch = body[idx..].chars().next()?;
+        let ch_len = ch.len_utf8();
+
+        if !is_name_char(ch) {
+            prev_was_name_char = false;
+            idx += ch_len;
+            continue;
+        }
+        if prev_was_name_char {
+            // Mid-token: the run that contains this character already started
+            // at an earlier position and was tested there.
+            idx += ch_len;
+            continue;
+        }
+
+        // Start of a whole token: take the maximal run of name characters.
+        let start = idx;
+        let mut end = start;
+        for (off, c) in body[start..].char_indices() {
+            if is_name_char(c) {
+                end = start + off + c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        // PEP 508 names end on an alphanumeric; hand any trailing separator
+        // back so `flask.` still anchors as `flask`.
+        while end > start
+            && body[start..end]
+                .chars()
+                .next_back()
+                .is_some_and(|c| !c.is_alphanumeric())
+        {
+            end -= body[start..end]
+                .chars()
+                .next_back()
+                .map_or(0, char::len_utf8);
+        }
+
+        if end > start && crate::parsers::pep508::normalize_name(&body[start..end]) == target {
+            let after = &body[end..];
             if let Some(close) = after.strip_prefix('[').and_then(|r| r.find(']')) {
                 return Some(end + close + 2);
             }
             return Some(end);
         }
-        from = end;
+
+        prev_was_name_char = true;
+        idx += ch_len;
     }
 
     None
@@ -610,6 +666,77 @@ mod tests {
     }
 
     #[test]
+    fn test_anchor_matches_the_normalized_key_not_the_spelling() {
+        let updater = FileUpdater::new();
+
+        // The parsers key on the PEP 503 normalized name, so these are the
+        // keys the updater is handed for these very lines.
+        let result = updater
+            .replace_in_requirements(
+                "typing_extensions>=4.0",
+                "typing-extensions",
+                ">=4.0",
+                ">=4.9",
+            )
+            .unwrap();
+        assert_eq!(result, "typing_extensions>=4.9");
+
+        let result = updater
+            .replace_in_requirements("zope.interface>=5.0", "zope-interface", ">=5.0", ">=6.1")
+            .unwrap();
+        assert_eq!(result, "zope.interface>=6.1");
+
+        let result = updater
+            .replace_in_pyproject(
+                "    \"Ruamel.Yaml.Clib>=0.2.7\",",
+                "ruamel-yaml-clib",
+                ">=0.2.7",
+                ">=0.2.8",
+            )
+            .unwrap();
+        assert_eq!(result, "    \"Ruamel.Yaml.Clib>=0.2.8\",");
+
+        // Extras still survive the widened anchor.
+        let result = updater
+            .replace_in_requirements(
+                "zope.interface[test]==5.0.0",
+                "zope-interface",
+                "==5.0.0",
+                "==6.1.0",
+            )
+            .unwrap();
+        assert_eq!(result, "zope.interface[test]==6.1.0");
+    }
+
+    #[test]
+    fn test_normalized_anchor_stays_whole_token() {
+        let updater = FileUpdater::new();
+
+        // A longer name that merely folds to a superset must not anchor.
+        assert!(
+            updater
+                .replace_in_requirements(
+                    "zope.interface.extra==5.0.0",
+                    "zope-interface",
+                    "==5.0.0",
+                    "==6.1.0",
+                )
+                .is_none()
+        );
+
+        assert!(
+            updater
+                .replace_in_requirements(
+                    "requests_oauthlib==2.28.0",
+                    "requests",
+                    "==2.28.0",
+                    "==2.32.3",
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
     fn test_replace_in_pyproject_pep621_string() {
         let updater = FileUpdater::new();
 
@@ -672,6 +799,7 @@ mod tests {
             installed_released_at: None,
             target_released_at: None,
             latest_released_at: None,
+            check_failed: false,
         };
 
         let updater = FileUpdater::new();
@@ -715,6 +843,7 @@ mod tests {
             installed_released_at: None,
             target_released_at: None,
             latest_released_at: None,
+            check_failed: false,
         };
 
         let updater = FileUpdater::new();
@@ -818,6 +947,7 @@ mod tests {
             installed_released_at: None,
             target_released_at: None,
             latest_released_at: None,
+            check_failed: false,
         };
         let check2 = DependencyCheck {
             dependency: Dependency {
@@ -839,6 +969,7 @@ mod tests {
             installed_released_at: None,
             target_released_at: None,
             latest_released_at: None,
+            check_failed: false,
         };
 
         // Create updates with version strings
@@ -895,6 +1026,7 @@ mod tests {
                 installed_released_at: None,
                 target_released_at: None,
                 latest_released_at: None,
+                check_failed: false,
             },
             DependencyCheck {
                 dependency: Dependency {
@@ -916,6 +1048,7 @@ mod tests {
                 installed_released_at: None,
                 target_released_at: None,
                 latest_released_at: None,
+                check_failed: false,
             },
         ];
 
@@ -968,6 +1101,7 @@ mod tests {
                 installed_released_at: None,
                 target_released_at: None,
                 latest_released_at: None,
+                check_failed: false,
             },
             DependencyCheck {
                 dependency: Dependency {
@@ -989,6 +1123,7 @@ mod tests {
                 installed_released_at: None,
                 target_released_at: None,
                 latest_released_at: None,
+                check_failed: false,
             },
         ];
 

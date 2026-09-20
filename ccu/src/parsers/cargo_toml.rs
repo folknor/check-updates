@@ -76,8 +76,18 @@ impl CargoTomlParser {
         source_file: &Path,
         content: &str,
         section: &str,
+        section_path: &[&str],
     ) -> Vec<Dependency> {
         let mut deps = Vec::new();
+
+        // The root manifest is where workspace-inherited deps are declared, so
+        // their line numbers are looked up in its text. Read it once for the
+        // whole table rather than once per inherited dependency.
+        let root_content = self
+            .workspace_root
+            .as_deref()
+            .filter(|root_path| *root_path != source_file)
+            .and_then(|root_path| fs::read_to_string(root_path).ok());
 
         for (key, value) in table {
             let is_workspace_ref = Self::is_workspace_reference(value);
@@ -106,22 +116,16 @@ impl CargoTomlParser {
                     source_file
                 };
 
-                // For workspace refs, find the line in the root content instead
-                let (effective_content, line_number) = if is_workspace_ref
-                    && let Some(root_path) = &self.workspace_root
-                    && root_path != source_file
+                // For workspace refs, find the line in the root content instead,
+                // under [workspace.dependencies] where the version really lives.
+                let (line_content, line_number) = match (is_workspace_ref, root_content.as_deref())
                 {
-                    if let Ok(root_content) = fs::read_to_string(root_path) {
-                        let ln = self.find_line_number(&root_content, key, &version_str);
-                        (Some(root_content), ln)
-                    } else {
-                        (None, self.find_line_number(content, key, &version_str))
-                    }
-                } else {
-                    (None, self.find_line_number(content, key, &version_str))
+                    (true, Some(root)) => (
+                        root,
+                        Self::find_line_number(root, &["workspace", "dependencies"], key),
+                    ),
+                    _ => (content, Self::find_line_number(content, section_path, key)),
                 };
-
-                let line_content = effective_content.as_deref().unwrap_or(content);
                 let original_line = line_number
                     .and_then(|n| line_content.lines().nth(n.saturating_sub(1)))
                     .unwrap_or("")
@@ -230,25 +234,30 @@ impl CargoTomlParser {
         }
     }
 
-    /// Find the line number for a dependency.
+    /// Find the line number a dependency is declared on.
     ///
-    /// `None` when no line declares the key. ccu's updater edits through
-    /// `toml_edit`, not by line, so this is display and JSON data only - but
-    /// it must still be honest: the previous fallback of `1` reported the
-    /// `[package]` header as the location of every unlocated dependency.
-    fn find_line_number(&self, content: &str, name: &str, _version: &str) -> Option<usize> {
-        for (idx, line) in content.lines().enumerate() {
-            let trimmed = line.trim();
-            // Match lines like: name = "version" or name = { version = "..." }
-            if trimmed.starts_with(name) && (trimmed.contains('=') || trimmed.contains('{')) {
-                // Make sure it's not a substring match
-                let after_name = &trimmed[name.len()..].trim_start();
-                if after_name.starts_with('=') || after_name.starts_with('.') {
-                    return Some(idx + 1);
-                }
-            }
+    /// The lookup goes through `toml_edit`, which records a byte span for every
+    /// key it parses, so the answer is the span of *this* key inside *this*
+    /// section - not the first line of the file that happens to mention the
+    /// name. A text scan cannot tell `tokio = []` under `[features]` apart from
+    /// the real declaration; the span can.
+    ///
+    /// `None` when the section or key is not found, or when the document does
+    /// not reparse. ccu's updater edits through `toml_edit`, not by line, so
+    /// this is display and JSON data only - but it must still be honest: a
+    /// wrong line is worse than no line.
+    fn find_line_number(content: &str, section_path: &[&str], key: &str) -> Option<usize> {
+        let doc = toml_edit::Document::parse(content).ok()?;
+
+        let mut item = doc.as_item();
+        for segment in section_path {
+            item = item.as_table_like()?.get(segment)?;
         }
-        None
+
+        let (found_key, value) = item.as_table_like()?.get_key_value(key)?;
+        let span = found_key.span().or_else(|| value.span())?;
+        let prefix = content.get(..span.start)?;
+        Some(prefix.matches('\n').count() + 1)
     }
 }
 
@@ -270,24 +279,48 @@ impl DependencyParser for CargoTomlParser {
 
         // Parse [dependencies]
         if let Some(deps) = parsed.get("dependencies").and_then(|v| v.as_table()) {
-            all_deps.extend(self.parse_deps_table(deps, path, &content, "dependencies"));
+            all_deps.extend(self.parse_deps_table(
+                deps,
+                path,
+                &content,
+                "dependencies",
+                &["dependencies"],
+            ));
         }
 
         // Parse [dev-dependencies]
         if let Some(deps) = parsed.get("dev-dependencies").and_then(|v| v.as_table()) {
-            all_deps.extend(self.parse_deps_table(deps, path, &content, "dev-dependencies"));
+            all_deps.extend(self.parse_deps_table(
+                deps,
+                path,
+                &content,
+                "dev-dependencies",
+                &["dev-dependencies"],
+            ));
         }
 
         // Parse [build-dependencies]
         if let Some(deps) = parsed.get("build-dependencies").and_then(|v| v.as_table()) {
-            all_deps.extend(self.parse_deps_table(deps, path, &content, "build-dependencies"));
+            all_deps.extend(self.parse_deps_table(
+                deps,
+                path,
+                &content,
+                "build-dependencies",
+                &["build-dependencies"],
+            ));
         }
 
         // Parse [workspace.dependencies]
         if let Some(workspace) = parsed.get("workspace").and_then(|v| v.as_table())
             && let Some(deps) = workspace.get("dependencies").and_then(|v| v.as_table())
         {
-            all_deps.extend(self.parse_deps_table(deps, path, &content, "workspace.dependencies"));
+            all_deps.extend(self.parse_deps_table(
+                deps,
+                path,
+                &content,
+                "workspace.dependencies",
+                &["workspace", "dependencies"],
+            ));
         }
 
         // Parse [target.'cfg(...)'.{dependencies,dev-dependencies,build-dependencies}].
@@ -303,6 +336,7 @@ impl DependencyParser for CargoTomlParser {
                                 path,
                                 &content,
                                 &format!("target.{target_name}.{kind}"),
+                                &["target", target_name, kind],
                             ));
                         }
                     }
@@ -352,6 +386,37 @@ tokio = {{ version = "1.0", features = ["full"] }}
 
         let tokio_dep = deps.iter().find(|d| d.name == "tokio").unwrap();
         assert_eq!(tokio_dep.version_spec.version_string().unwrap(), "1.0");
+
+        Ok(())
+    }
+
+    #[test]
+    fn line_number_ignores_same_named_key_in_another_section() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        writeln!(
+            file,
+            r#"
+[package]
+name = "test"
+version = "0.1.0"
+
+[features]
+default = []
+tokio = []
+
+[dependencies]
+tokio = {{ version = "1.0", features = ["full"] }}
+"#
+        )?;
+
+        let parser = CargoTomlParser::new();
+        let deps = parser.parse(file.path())?;
+
+        let tokio_dep = deps.iter().find(|d| d.name == "tokio").unwrap();
+        // The declaration is the [dependencies] entry, not `tokio = []`
+        // under [features] eight lines earlier.
+        assert_eq!(tokio_dep.line_number, Some(11));
+        assert!(tokio_dep.original_line.contains("version"));
 
         Ok(())
     }

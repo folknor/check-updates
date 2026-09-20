@@ -158,6 +158,12 @@ fn print_fetch_failures(failures: &[FetchError]) {
 /// is untouched, so `will_update` and `update_blocker` answer exactly as before
 /// and `apply_updates` still sees the original checks.
 fn retarget_forced(check: &DependencyCheck) -> DependencyCheck {
+    // Nothing to retarget onto: a failed lookup has no latest version, and
+    // `latest` holds a placeholder that must never become a displayed target.
+    if check.check_failed {
+        return check.clone();
+    }
+
     let mut forced = check.clone();
     forced.severity =
         DependencyResolver::calculate_severity(check.current_version(), Some(&check.latest));
@@ -614,11 +620,17 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     let mut checks: Vec<DependencyCheck> = Vec::new();
 
     for dependency in &all_dependencies {
-        if let Some(package_info) = package_infos.get(&dependency.name) {
-            let installed = installed_versions.get(&dependency.name);
-            let check = resolver.resolve(dependency, package_info, installed);
-            checks.push(check);
-        }
+        let installed = installed_versions.get(&dependency.name);
+        // A package PyPI never answered for keeps a check of its own rather
+        // than being dropped: the run was asked about it, and silence about it
+        // reads as "up to date" in both the table and the JSON. This is a
+        // failed lookup, not the conda case - a conda-channel dependency is
+        // never sent to PyPI at all and stays in `errors`.
+        let check = match package_infos.get(&dependency.name) {
+            Some(package_info) => resolver.resolve(dependency, package_info, installed),
+            None => DependencyCheck::unchecked(dependency, installed),
+        };
+        checks.push(check);
     }
 
     // 5. Deduplicate for display (same package with same target).
@@ -634,6 +646,13 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     let deduplicated: Vec<&DependencyCheck> = display_checks
         .iter()
         .filter(|c| {
+            // A package that could not be checked is listed outside update
+            // mode, where the table is a report of what the run found. Under
+            // `-u` the header says "Dependencies updated:", which such a row
+            // would contradict; it surfaces in the fetch-failure list instead.
+            if c.check_failed {
+                return !args.update && seen.insert(format!("unchecked:{}", c.dependency.name));
+            }
             if !c.has_update() {
                 return false;
             }
@@ -721,7 +740,9 @@ async fn run_project_mode(args: &Args) -> Result<()> {
                 "-u".cyan()
             );
         }
-    } else if !deduplicated.is_empty() {
+    } else if deduplicated.iter().any(|c| !c.check_failed) {
+        // Rows that could not be checked are not updates, so a table holding
+        // only those must not invite the user to run `-u` on them.
         println!();
         println!(
             "Run {} to upgrade patch, {} to upgrade patch+minors, and {} to force upgrade all.",
@@ -807,6 +828,7 @@ mod tests {
             installed_released_at: None,
             target_released_at: None,
             latest_released_at: Some("2025-01-01".to_string()),
+            check_failed: false,
         };
         check.dependency.version_spec = VersionSpec::Pinned(Version::new(2, 28, 0));
 

@@ -12,12 +12,16 @@ impl TableRenderer {
         Self { show_colors }
     }
 
-    /// Render all packages with updates
+    /// Render all packages with updates, plus every dependency whose registry
+    /// lookup failed: leaving those out would let "All dependencies are up to
+    /// date!" cover a dependency that was never checked at all.
     pub fn render(&self, checks: &[DependencyCheck], header: &str) {
-        let checks_with_updates: Vec<&DependencyCheck> =
-            checks.iter().filter(|check| check.has_update()).collect();
+        let rows: Vec<&DependencyCheck> = checks
+            .iter()
+            .filter(|check| check.has_update() || check.check_failed)
+            .collect();
 
-        self.render_deduped(&checks_with_updates, header);
+        self.render_deduped(&rows, header);
     }
 
     /// Render a list of checks, one row per distinct `(name, target)` pair.
@@ -199,6 +203,27 @@ impl TableRenderer {
         // the jump is, the marker says `-u` will not make it. Dropping the
         // severity to make room would hide the size of what the user now has to
         // apply by hand.
+        // A failed lookup owns the last column outright. It has no severity and
+        // no blocker - nothing was resolved for it - and the wording matches
+        // what the global tables already print for the same situation.
+        if check.check_failed {
+            let status = if self.show_colors {
+                "could not check".dimmed().to_string()
+            } else {
+                "could not check".to_string()
+            };
+            let row = format!(
+                "  {:<name_w$}  {:>from_w$} → {:<to_w$}  {status}",
+                check.dependency.name,
+                from,
+                to,
+                name_w = name_width,
+                from_w = from_width,
+                to_w = to_width,
+            );
+            return row.trim_end().to_string();
+        }
+
         let severity_str = match (self.format_severity(check.severity), check.update_blocker()) {
             (severity, None) => severity,
             (severity, Some(blocker)) if severity.is_empty() => self.paint_marker(blocker.marker()),
@@ -207,10 +232,9 @@ impl TableRenderer {
             }
         };
 
-        let available_hint = if check.has_newer_available() {
-            format!("  ({} available)", check.latest)
-        } else {
-            String::new()
+        let available_hint = match check.reported_latest() {
+            Some(latest) if check.has_newer_available() => format!("  ({latest} available)"),
+            _ => String::new(),
         };
 
         // Built then trimmed rather than printed directly: the last column is
@@ -293,6 +317,7 @@ mod tests {
             installed_released_at: None,
             target_released_at: None,
             latest_released_at: None,
+            check_failed: false,
         }
     }
 
@@ -339,6 +364,29 @@ mod tests {
         assert!(
             renderer.blocker_legend(&[&ok]).is_empty(),
             "an ordinary table prints no legend"
+        );
+    }
+
+    /// A dependency the registry never answered for keeps a row, and the row
+    /// says so rather than rendering as an empty severity - which is what an
+    /// up-to-date dependency looks like.
+    #[test]
+    fn failed_lookup_row_says_it_could_not_be_checked() {
+        let renderer = TableRenderer::new(false);
+        let dependency = check(VersionSpec::Caret(Version::new(1, 2, 3)), true).dependency;
+        let installed = Version::new(1, 2, 3);
+        let failed = DependencyCheck::unchecked(&dependency, Some(&installed));
+
+        let row = renderer.format_row(&failed, 8, 6, 6);
+        assert!(
+            row.contains("react"),
+            "the dependency is still named: {row}"
+        );
+        assert!(row.contains("1.2.3"), "what we knew is shown: {row}");
+        assert!(row.ends_with("could not check"), "{row}");
+        assert!(
+            !row.contains("available"),
+            "no registry answer, so nothing is available: {row}"
         );
     }
 

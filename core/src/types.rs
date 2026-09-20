@@ -172,6 +172,22 @@ pub struct DependencyCheck {
     /// ISO-8601 publish date of the latest version (registry data). Omitted
     /// from the report when absent.
     pub latest_released_at: Option<String>,
+    /// True when the registry never answered for this dependency, so nothing
+    /// below `dependency` and `installed` was actually resolved.
+    ///
+    /// Such a row exists because the alternative is worse: the CLIs used to
+    /// drop a dependency whose fetch failed, so it was absent from the table
+    /// *and* from the JSON `checks` array, and a consumer could not tell "up to
+    /// date" from "we could not check". A failed check carries `target: None`,
+    /// so it has no update, is never written by `-u`, and is counted as neither
+    /// a skipped nor a blocked update - the only thing it claims is that it was
+    /// asked about and got no answer.
+    ///
+    /// Consumers must not read `has_update: false` on such a row as "up to
+    /// date". The report emits `latest: null` for it, because the in-memory
+    /// `latest` is only a placeholder here (see [`DependencyCheck::unchecked`]),
+    /// never a version the registry returned.
+    pub check_failed: bool,
 }
 
 /// Hand-written rather than derived so the report carries `updatable` and
@@ -186,6 +202,11 @@ pub struct DependencyCheck {
 /// absent, which in JSON-consuming languages is the same falsy value);
 /// `blocked_reason` appears only when there is one. A row with no target is
 /// trivially `updatable: true` - nothing is being withheld from it.
+///
+/// `check_failed` is always emitted for the same reason `updatable` is, and it
+/// is the field that qualifies every other one: when it is true, `latest` is
+/// serialized as `null` rather than as the placeholder the struct carries, so a
+/// consumer cannot mistake an unanswered lookup for a registry answer.
 impl Serialize for DependencyCheck {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
@@ -196,16 +217,17 @@ impl Serialize for DependencyCheck {
             + usize::from(self.latest_released_at.is_some())
             + usize::from(blocker.is_some());
 
-        let mut state = serializer.serialize_struct("DependencyCheck", 9 + optional)?;
+        let mut state = serializer.serialize_struct("DependencyCheck", 10 + optional)?;
         state.serialize_field("dependency", &self.dependency)?;
         state.serialize_field("installed", &self.installed)?;
         state.serialize_field("in_range", &self.in_range)?;
-        state.serialize_field("latest", &self.latest)?;
+        state.serialize_field("latest", &self.reported_latest())?;
         state.serialize_field("target", &self.target)?;
         state.serialize_field("target_spec", &self.target_spec)?;
         state.serialize_field("severity", &self.severity)?;
         state.serialize_field("force_spec", &self.force_spec)?;
         state.serialize_field("updatable", &blocker.is_none())?;
+        state.serialize_field("check_failed", &self.check_failed)?;
         if let Some(blocker) = blocker {
             state.serialize_field("blocked_reason", &blocker)?;
         }
@@ -223,6 +245,48 @@ impl Serialize for DependencyCheck {
 }
 
 impl DependencyCheck {
+    /// A check for a dependency the registry never answered for.
+    ///
+    /// Every resolved field is left empty: there is no target, no severity and
+    /// no spec to write, because nothing was resolved. `latest` cannot be left
+    /// empty - it is not an `Option`, and the three CLI tables read it - so it
+    /// is filled with the best version already in hand (the installed one, else
+    /// the version the declaration names, else `0.0.0`) purely as a placeholder.
+    /// It is never reported: [`DependencyCheck::reported_latest`] returns `None`
+    /// for a failed check and the JSON carries `latest: null`.
+    pub fn unchecked(dependency: &Dependency, installed: Option<&Version>) -> Self {
+        let placeholder = installed
+            .or_else(|| dependency.version_spec.base_version())
+            .cloned()
+            .unwrap_or_else(|| Version::new(0, 0, 0));
+
+        Self {
+            dependency: dependency.clone(),
+            installed: installed.cloned(),
+            in_range: None,
+            latest: placeholder,
+            target: None,
+            target_spec: None,
+            severity: None,
+            force_spec: None,
+            installed_released_at: None,
+            target_released_at: None,
+            latest_released_at: None,
+            check_failed: true,
+        }
+    }
+
+    /// The latest version as it may be reported to a user or a consumer:
+    /// `None` when the lookup failed, because the `latest` field holds a
+    /// placeholder in that case and printing it would invent a registry answer.
+    pub fn reported_latest(&self) -> Option<&Version> {
+        if self.check_failed {
+            None
+        } else {
+            Some(&self.latest)
+        }
+    }
+
     /// Check if this dependency has any update available
     pub fn has_update(&self) -> bool {
         self.target.is_some()
@@ -262,6 +326,14 @@ impl DependencyCheck {
     /// already carries, so there is nothing a field could record that this
     /// cannot derive.
     pub fn update_blocker(&self) -> Option<UpdateBlocker> {
+        // A failed check is not a blocked update: nothing was withheld from
+        // it, because nothing was resolved for it in the first place. It must
+        // not land in the "cannot be written even with --force" count, which
+        // the user is told to act on.
+        if self.check_failed {
+            return None;
+        }
+
         // A row with no update to offer has nothing to be blocked about: "up
         // to date" is already an honest answer, and flagging it would bury the
         // rows that do show a target `-u` will silently refuse to write.
@@ -283,6 +355,9 @@ impl DependencyCheck {
 
     /// Check if there's a newer version available beyond the target
     pub fn has_newer_available(&self) -> bool {
+        if self.check_failed {
+            return false;
+        }
         match &self.target {
             Some(target) => self.latest > *target,
             None => false,
@@ -323,6 +398,7 @@ mod tests {
             installed_released_at: None,
             target_released_at: None,
             latest_released_at: None,
+            check_failed: false,
         }
     }
 
@@ -435,6 +511,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The whole point of the failed-check row: it exists, it offers nothing,
+    /// and it is neither writable nor counted as a withheld update.
+    #[test]
+    fn a_failed_check_offers_nothing_and_is_not_an_update() {
+        let dependency = check(UpdateSeverity::Patch).dependency;
+        let installed = Version::new(6, 0, 0);
+        let failed = DependencyCheck::unchecked(&dependency, Some(&installed));
+
+        assert!(failed.check_failed);
+        assert!(!failed.has_update());
+        assert!(!failed.will_update(true, true));
+        assert_eq!(failed.update_blocker(), None, "not a blocked update");
+        assert!(!failed.has_newer_available());
+        assert_eq!(failed.reported_latest(), None, "no registry answer to give");
+        assert_eq!(
+            failed.current_version(),
+            Some(&installed),
+            "what we did know survives"
+        );
+    }
+
+    /// The placeholder never escapes as a version anyone could act on, even
+    /// when there is nothing installed to fall back to.
+    #[test]
+    fn a_failed_check_reports_no_latest_without_an_installed_version() {
+        let mut dependency = check(UpdateSeverity::Patch).dependency;
+        dependency.version_spec = VersionSpec::Any;
+
+        let failed = DependencyCheck::unchecked(&dependency, None);
+        assert_eq!(failed.reported_latest(), None);
+        assert_eq!(failed.current_version(), None);
     }
 
     #[test]

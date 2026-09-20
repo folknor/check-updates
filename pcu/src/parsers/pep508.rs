@@ -72,19 +72,41 @@ impl Requirement {
 
 /// Normalize a distribution name for cross-source matching.
 ///
-/// This is deliberately *not* full PEP 503 normalization. PEP 503 is
-/// `re.sub(r"[-_.]+", "-", name).lower()`, which also folds `.` and collapses
-/// runs, so `zope.interface` becomes `zope-interface`. pcu matches parser
-/// output against lock-file output by this key, and `pcu/src/parsers/
-/// lockfiles.rs` folds only `_`. Tightening one side alone would stop
-/// `zope.interface` from ever matching its locked entry and every dotted
-/// distribution would report as uninstalled.
+/// This is PEP 503 normalization: `re.sub(r"[-_.]+", "-", name).lower()`, so
+/// any run of `-`, `_` or `.` folds to a single `-` and the result is
+/// lowercased. `zope.interface`, `zope_interface` and `Zope--Interface` all
+/// key as `zope-interface`, which is what PyPI and every lock-file format
+/// compare by.
 ///
-/// Upgrading to full PEP 503 therefore means changing this function *and* the
-/// three normalization sites in `lockfiles.rs` to call it, in one change.
-/// Until then this is the one place the rule lives.
+/// This is the one place the rule lives, and it must stay that way: pcu
+/// matches manifest-parser output against lock-file output by this key, and
+/// `pcu/src/parsers/lockfiles.rs` normalizes every name it records through
+/// this function. A second, weaker copy of the rule anywhere would make dotted
+/// or run-separated distributions report as uninstalled.
+///
+/// Conda names are not PEP 503 names and are deliberately not normalized here.
 pub fn normalize_name(name: &str) -> String {
-    name.trim().to_lowercase().replace('_', "-")
+    let mut out = String::with_capacity(name.len());
+    let mut pending_separator = false;
+
+    for ch in name.trim().chars() {
+        if matches!(ch, '-' | '_' | '.') {
+            // A run of separators of any length becomes exactly one `-`,
+            // wherever it sits: the regex does not special-case position.
+            pending_separator = true;
+            continue;
+        }
+        if pending_separator {
+            out.push('-');
+            pending_separator = false;
+        }
+        out.extend(ch.to_lowercase());
+    }
+    if pending_separator {
+        out.push('-');
+    }
+
+    out
 }
 
 /// Parse one PEP 508 requirement.
@@ -384,6 +406,32 @@ mod tests {
         assert_eq!(r.name, "zope.interface");
         let r = parse("typing_extensions>=4.0").unwrap();
         assert_eq!(r.normalized_name(), "typing-extensions");
+    }
+
+    #[test]
+    fn normalization_is_pep_503() {
+        // re.sub(r"[-_.]+", "-", name).lower()
+        assert_eq!(normalize_name("zope.interface"), "zope-interface");
+        assert_eq!(normalize_name("Zope.Interface"), "zope-interface");
+        assert_eq!(normalize_name("zope_interface"), "zope-interface");
+        assert_eq!(normalize_name("foo--bar"), "foo-bar");
+        assert_eq!(normalize_name("foo._-.bar"), "foo-bar");
+        assert_eq!(normalize_name("ruamel.yaml.clib"), "ruamel-yaml-clib");
+        assert_eq!(normalize_name("  Requests  "), "requests");
+        // Names that need no folding are returned unchanged but lowercased.
+        assert_eq!(normalize_name("Flask"), "flask");
+        // Idempotent: normalizing a normalized key is a no-op.
+        let once = normalize_name("Zope..Interface");
+        assert_eq!(normalize_name(&once), once);
+    }
+
+    #[test]
+    fn a_dotted_requirement_keys_the_same_as_its_lock_entry() {
+        // The cross-file invariant: whatever a manifest writes and whatever a
+        // lock file writes must land on one key.
+        let from_manifest = parse("zope.interface>=5.0").unwrap().normalized_name();
+        assert_eq!(from_manifest, normalize_name("zope-interface"));
+        assert_eq!(from_manifest, normalize_name("zope_interface"));
     }
 
     #[test]

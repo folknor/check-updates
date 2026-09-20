@@ -74,31 +74,6 @@ fn print_fetch_failures(failures: &[FetchError]) {
     }
 }
 
-/// Dependencies we resolved from the manifests but could not check, because
-/// crates.io never answered for that name. They cannot appear in `checks` -
-/// a `DependencyCheck` requires a `latest` version we do not have - so they get
-/// their own machine-readable array. Without it a consumer cannot tell
-/// "up to date" from "we could not check": the free-text `errors` strings carry
-/// no structured package name.
-fn unchecked_to_json(unchecked: &[UncheckedDependency]) -> Vec<serde_json::Value> {
-    unchecked
-        .iter()
-        .map(|u| {
-            serde_json::json!({
-                "name": u.name,
-                "source_file": u.source_file,
-                "section": u.section,
-            })
-        })
-        .collect()
-}
-
-struct UncheckedDependency {
-    name: String,
-    source_file: std::path::PathBuf,
-    section: Option<String>,
-}
-
 /// Identity of a *declaration*, used to keep the JSON `checks` array from
 /// repeating one.
 ///
@@ -149,6 +124,12 @@ fn dedupe_declarations(checks: &[DependencyCheck]) -> Vec<&DependencyCheck> {
 /// is untouched, so `will_update` and `update_blocker` answer exactly as before
 /// and `apply_updates` still sees the original checks.
 fn retarget_forced(check: &DependencyCheck) -> DependencyCheck {
+    // Nothing to retarget onto: a failed lookup has no latest version, and
+    // `latest` holds a placeholder that must never become a displayed target.
+    if check.check_failed {
+        return check.clone();
+    }
+
     let mut forced = check.clone();
     forced.severity =
         DependencyResolver::calculate_severity(check.current_version(), Some(&check.latest));
@@ -158,17 +139,17 @@ fn retarget_forced(check: &DependencyCheck) -> DependencyCheck {
     forced
 }
 
-fn emit_json_project(
-    checks: &[&DependencyCheck],
-    errors: &[FetchError],
-    unchecked: &[UncheckedDependency],
-) -> Result<()> {
+/// The `checks` array carries every dependency the run was asked about,
+/// including the ones crates.io never answered for: those are ordinary checks
+/// with `check_failed: true` and `latest: null`. There is no separate
+/// `unchecked` array any more - it existed only because a `DependencyCheck`
+/// could not represent a failed lookup, and it can now.
+fn emit_json_project(checks: &[&DependencyCheck], errors: &[FetchError]) -> Result<()> {
     let report = serde_json::json!({
         "schema_version": SCHEMA_VERSION,
         "tool": TOOL_NAME,
         "mode": "project",
         "checks": checks,
-        "unchecked": unchecked_to_json(unchecked),
         "errors": errors_to_json(errors),
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -417,7 +398,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     if detected_files.is_empty() {
         if args.json {
-            emit_json_project(&[], &[], &[])?;
+            emit_json_project(&[], &[])?;
         } else {
             println!("No Cargo.toml found in {project_path:?}");
         }
@@ -450,7 +431,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     if all_dependencies.is_empty() {
         if args.json {
-            emit_json_project(&[], &[], &[])?;
+            emit_json_project(&[], &[])?;
         } else {
             println!("No dependencies found in Cargo.toml");
         }
@@ -506,39 +487,32 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     // 4. Resolve updates
     let resolver = DependencyResolver::new();
     let mut checks: Vec<DependencyCheck> = Vec::new();
-    // Dependencies crates.io never answered for. Kept rather than dropped, so
-    // "we could not check this" is distinguishable from "it is up to date".
-    let mut unchecked: Vec<UncheckedDependency> = Vec::new();
 
     for dependency in &all_dependencies {
-        if let Some(package_info) = package_infos.get(&dependency.name) {
-            let installed = installed_versions
-                .get(&dependency.name)
-                .and_then(|versions| {
-                    // When multiple versions exist in Cargo.lock (e.g. direct + transitive),
-                    // pick the highest version that satisfies the declared spec
-                    let mut matching: Vec<&Version> = versions
-                        .iter()
-                        .filter(|v| dependency.version_spec.satisfies(v))
-                        .collect();
-                    matching.sort();
-                    matching.last().copied().or_else(|| {
-                        // Fallback: highest overall (shouldn't happen in practice)
-                        versions.iter().max()
-                    })
-                });
-            let check = resolver.resolve(dependency, package_info, installed);
-            checks.push(check);
-        } else if !unchecked.iter().any(|u| u.name == dependency.name) {
-            // The fetch is per crate name, so one entry per name is the whole
-            // story; a workspace-inherited dep would otherwise repeat once per
-            // inheriting member.
-            unchecked.push(UncheckedDependency {
-                name: dependency.name.clone(),
-                source_file: dependency.source_file.clone(),
-                section: dependency.section.clone(),
+        let installed = installed_versions
+            .get(&dependency.name)
+            .and_then(|versions| {
+                // When multiple versions exist in Cargo.lock (e.g. direct + transitive),
+                // pick the highest version that satisfies the declared spec
+                let mut matching: Vec<&Version> = versions
+                    .iter()
+                    .filter(|v| dependency.version_spec.satisfies(v))
+                    .collect();
+                matching.sort();
+                matching.last().copied().or_else(|| {
+                    // Fallback: highest overall (shouldn't happen in practice)
+                    versions.iter().max()
+                })
             });
-        }
+
+        // A crate crates.io never answered for keeps a check of its own rather
+        // than being dropped: the run was asked about it, and silence about it
+        // reads as "up to date" in both the table and the JSON.
+        let check = match package_infos.get(&dependency.name) {
+            Some(package_info) => resolver.resolve(dependency, package_info, installed),
+            None => DependencyCheck::unchecked(dependency, installed),
+        };
+        checks.push(check);
     }
 
     // 5. Deduplicate for display (same crate with same target).
@@ -554,6 +528,13 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     let deduplicated: Vec<&DependencyCheck> = display_checks
         .iter()
         .filter(|c| {
+            // A crate that could not be checked is listed outside update mode,
+            // where the table is a report of what the run found. Under `-u` the
+            // header says "Dependencies updated:", which such a row would
+            // contradict; it surfaces in the fetch-failure list instead.
+            if c.check_failed {
+                return !args.update && seen.insert(format!("unchecked:{}", c.dependency.name));
+            }
             if !c.has_update() {
                 return false;
             }
@@ -581,7 +562,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
             let result = updater.apply_updates(&checks, args.minor, args.force)?;
             result.print_not_applied();
         }
-        emit_json_project(&dedupe_declarations(&checks), &fetch_failures, &unchecked)?;
+        emit_json_project(&dedupe_declarations(&checks), &fetch_failures)?;
         return Ok(());
     }
 
@@ -652,7 +633,9 @@ async fn run_project_mode(args: &Args) -> Result<()> {
                 "-u".cyan()
             );
         }
-    } else if !deduplicated.is_empty() {
+    } else if deduplicated.iter().any(|c| !c.check_failed) {
+        // Rows that could not be checked are not updates, so a table holding
+        // only those must not invite the user to run `-u` on them.
         println!();
         println!(
             "Run {} to upgrade patch, {} to upgrade patch+minors, and {} to force upgrade all.",
@@ -694,7 +677,30 @@ mod tests {
             installed_released_at: None,
             target_released_at: Some("2023-10-01".to_string()),
             latest_released_at: Some("2025-01-01".to_string()),
+            check_failed: false,
         }
+    }
+
+    /// The report shape that replaced the separate `unchecked` array: the
+    /// dependency stays in `checks`, says the check failed, and reports no
+    /// latest version - so "up to date" and "could not check" cannot be
+    /// confused for each other.
+    #[test]
+    fn a_failed_lookup_stays_in_the_checks_array() {
+        let resolved = inherited_check("dependencies");
+        let installed = Version::new(1, 0, 190);
+        let failed = DependencyCheck::unchecked(&resolved.dependency, Some(&installed));
+
+        let json = serde_json::to_value(&failed).expect("check serializes");
+        assert_eq!(json["check_failed"], true);
+        assert!(json["latest"].is_null(), "no registry answer to report");
+        assert_eq!(json["installed"], "1.0.190");
+        assert!(json["target"].is_null());
+        assert_eq!(json["dependency"]["name"], "serde");
+
+        let resolved_json = serde_json::to_value(&resolved).expect("check serializes");
+        assert_eq!(resolved_json["check_failed"], false);
+        assert_eq!(resolved_json["latest"], "2.1.0");
     }
 
     #[test]

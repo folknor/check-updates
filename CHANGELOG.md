@@ -13,7 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 - `pcu` reads `pylock.toml`, `Pipfile.lock`, `requirements.lock` and `conda-lock.yml` for installed versions; `ncu` reads bun's text `bun.lock`.
 - Rows that `-u` cannot write - an unmodellable constraint, or a declaration with no version - are marked in the table with a reason, and carry `updatable` / `blocked_reason` in `--json`.
-- `--json` registry errors carry `package` and a stable `kind`; `ccu --json` gains an `unchecked` array.
+- `--json` registry errors carry `package` and a stable `kind`.
+- A dependency whose registry lookup failed now keeps a row instead of vanishing: the table marks it `could not check`, and `--json` keeps it in `checks` with `check_failed: true` and `latest: null`. "Up to date" and "we could not check" are no longer indistinguishable.
+
+### Changed
+- `ccu` and `pcu` no longer abort when *every* registry lookup fails; a total failure is reported the same way a partial one always was, as unchecked rows plus the registry errors.
 
 ## [0.4.0] - 2026-07-17
 

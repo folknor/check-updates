@@ -56,6 +56,10 @@ impl DependencyResolver {
             installed_released_at,
             target_released_at,
             latest_released_at,
+            // The registry answered: this is a real comparison. The other
+            // case is `DependencyCheck::unchecked`, which the CLIs build
+            // when no `PackageInfo` ever arrived for a dependency.
+            check_failed: false,
         }
     }
 

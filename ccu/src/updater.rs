@@ -372,6 +372,7 @@ mod tests {
             installed_released_at: None,
             target_released_at: None,
             latest_released_at: None,
+            check_failed: false,
         }
     }
 

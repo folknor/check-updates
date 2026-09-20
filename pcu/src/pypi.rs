@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use check_updates_core::{PackageInfo, Version};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -401,20 +401,14 @@ impl PyPiClient {
             }
         }
 
-        // If we have some results, return them even if some packages failed
-        if !packages.is_empty() || failures.is_empty() {
-            Ok(GetPackagesResult { packages, failures })
-        } else {
-            // All packages failed
-            let lines: Vec<String> = failures
-                .iter()
-                .map(|f| format!("{}: {}", f.package, f.detail))
-                .collect();
-            Err(anyhow!(
-                "Failed to fetch all packages:\n{}",
-                lines.join("\n")
-            ))
-        }
+        // Failures are reported, never fatal - including when every package
+        // failed. A partial failure already returned its results with the
+        // failures alongside them, and making the total case an error meant the
+        // same event was handled under two opposite policies: one dependency
+        // unreachable produced a report, all of them produced no report at all.
+        // The caller turns each failure into a `check_failed` row, which says
+        // more than an aborted run does.
+        Ok(GetPackagesResult { packages, failures })
     }
 }
 
