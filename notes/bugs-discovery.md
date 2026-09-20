@@ -12,48 +12,63 @@
 Findings about what the tools find on disk and what they make of it: detectors,
 manifest parsers, lock-file readers.
 
-## DSC-001 - ccu run inside a workspace member reports nothing, silently
+## DSC-002 - ncu's workspace globs are still not gitignore-aware
 
-Reported by ccu.
+Reported by ncu. Narrowed: the `node_modules` hole is closed.
 
-The root manifest is only ever looked for at `project_path/Cargo.toml`, and
-`Cargo.lock` likewise (`CargoLockParser::find_and_parse`). Neither walks upward.
-In this very repo, `ccu/Cargo.toml` has 17 `.workspace = true` entries; `ccu ccu/`
-never calls `load_workspace_deps` with the real root, so
-`extract_version_or_workspace` returns `None` for all of them and they are
-dropped with no message. The user gets "No dependencies found in Cargo.toml" or a
-short, misleadingly clean table.
+`ncu/src/detector.rs` now filters glob hits through `is_excluded`, which rejects
+any path with a component below `project_path` that is in
+`{node_modules, bower_components, jspm_packages}` or starts with `.`. It also
+uses `is_file()` rather than `exists()` and sorts for deterministic order.
 
-The same path yields zero installed versions, so `current` falls back to the
-spec's base version and severities are computed against the declared spec rather
-than the lock - contradicting the resolution semantics `CLAUDE.md` states ccu
-keeps ("compares the installed version from Cargo.lock"). Fix: discover the
-workspace root by walking up for a `Cargo.toml` with a `[workspace]` table, the
-way cargo does.
+b24f805's mechanism did not transfer literally, which is worth knowing before
+the next attempt: ccu walks the tree itself and could swap its recursion for
+`ignore::WalkBuilder`, whereas an ncu workspace entry is a user-supplied glob
+and the path set comes from `glob::glob`. The exclusion is a filter over glob
+hits, not a walk filter.
 
-## DSC-002 - ncu's workspace glob expansion has no node_modules or gitignore guard
+Residue: a gitignored directory that is neither hidden nor in that list -
+`dist/`, `fixtures/` - is still matched. Closing it means adding `ignore` to
+`ncu/Cargo.toml` (ccu already declares it, so it is already in `Cargo.lock`)
+and rewriting `expand_workspace_pattern` as an `ignore::WalkBuilder` walk
+matched against a compiled `glob::Pattern`. That subsumes the hand-rolled list.
+Promoting `ignore` to `[workspace.dependencies]` at the same time is worth
+considering, since pcu will want it.
 
-Reported by ncu.
+## DSC-019 - ncu's workspace globs accept patterns escaping the project root
 
-`detector.rs::expand_workspace_pattern` globs `<pattern>/package.json` with no
-filtering. A `"workspaces": ["packages/**"]` entry - legal and common - matches
-every `package.json` under `packages/*/node_modules/`, so ncu parses and then
-registry-queries thousands of transitive packages, and `-u` would rewrite files
-inside `node_modules`. ccu received exactly this fix in b24f805 ("skip gitignored
-dirs during workspace auto-discovery"); ncu never did.
+Lateral finding from the DSC-002 work.
 
-## DSC-003 - ccu's two discovery paths have different exclusion semantics
+npm rejects a workspace pattern that resolves outside the project root. ncu does
+not check, so `"workspaces": ["../../*"]` is happily detected and, under `-u`,
+rewrites manifests outside the tree the user pointed at.
 
-Reported by ccu.
+`expand_workspace_pattern` also builds its glob from
+`self.project_path.join(pattern).to_string_lossy()`, so a *project path*
+containing `*`, `?` or `[` is silently reinterpreted as a pattern. That is the
+same defect as DSC-003's third bullet, which is filed against ccu only; ccu's
+half is fixed (the project-path prefix goes through `glob::Pattern::escape`),
+ncu's is not.
 
-- `is_excluded` compares the member directory against the exclude pattern
-  exactly, but cargo excludes whole subtrees: `exclude = ["vendor"]` does not
-  exclude `vendor/foo`.
-- Gitignore filtering applies only to `auto_discover_members`; explicit glob
-  members go through `glob::glob` with no ignore awareness.
-- `expand_workspace_member` builds a glob from `project_path.to_string_lossy()`,
-  so a project path containing `*`, `?` or `[` is silently reinterpreted as a
-  pattern.
+## DSC-003 - closed, with one sub-point adjudicated against
+
+Reported by ccu. Two of three fixed in `ccu/src/detector.rs`: the project-path
+prefix now goes through `glob::Pattern::escape` so metacharacters in a path the
+user did not choose are literal (in `expand_workspace_member` and in
+`is_excluded`'s glob branch), and `is_excluded` uses a component-wise
+`strip_prefix` so `exclude = ["vendor"]` covers `vendor/foo` without `vendored`
+falsely matching.
+
+The gitignore sub-point was **refused, and should not be re-hunted.** b24f805's
+rationale is specific to auto-discovery, which *guesses* at membership and must
+not adopt unrelated vendored checkouts found by scanning. An explicit `members`
+entry is the opposite case: the user declaring what belongs. Cargo itself
+expands member globs with no ignore awareness, and a gitignored-but-listed
+member is a real member whose dependencies must be reported - filtering it would
+make ccu report a strict subset of what `cargo build` builds. The reasoning is a
+doc comment on `expand_workspace_member`.
+
+Kept only until the ncu half of the glob-injection bullet lands: see DSC-019.
 
 ## DSC-004 - pcu resolves conda dependencies against PyPI
 
@@ -71,39 +86,12 @@ update. Poetry's `python` key is explicitly skipped; conda's `python` is not.
 The hunter's position: conda support as written cannot be right without a conda
 channel client - either write one, or drop the conda claim.
 
-## DSC-005 - Operator scanning picks the first operator in the list, not the leftmost in the string
-
-Reported by pcu-parsers.
-
-- `requirements.rs::split_package_version` iterates
-  `["==", ">=", "<=", "~=", "!=", ">", "<"]` and breaks on the first found
-  anywhere. `pkg<3.0,>=2.0` matches `>=` and yields the package name
-  `pkg<3.0,`. `pkg>1.0,<=2.0` yields `pkg>1.0,`.
-- `pyproject.rs::parse_dependency_string` has the identical bug with
-  `[">=", "<=", "==", "!=", "~=", ">", "<", "^", "~"]`: `django<3.0,>=2.0` gives
-  the name `django<3.0,`.
-- `conda.rs::parse_pip_dependency` is the only one that does it correctly
-  (tracks minimum position).
-
-Garbage package names go straight to PyPI. Three hand-rolled splitters, one
-correct; this should be one shared PEP 508 tokenizer.
-
-## DSC-006 - pyproject silently discards the version spec of any dependency with extras
-
-Reported by pcu-parsers.
-
-`parse_dependency_string` truncates at `[` *before* looking for operators:
-
-```rust
-let dep_str_no_extras = if let Some(idx) = dep_str.find('[') { &dep_str[..idx] } else { dep_str };
-```
-
-`"requests[security]>=2.28.0"` becomes name `requests`, spec `Any`. The declared
-constraint is gone, the table shows `*`, `is_rewritable()` is false so `-u`
-silently skips it. The existing test `test_parse_dependency_with_extras` only
-asserts the name, so it passes. `requirements.rs` gets this right (splits
-version first, strips extras after) - the two parsers disagree on the same
-input string.
+Sharpened rather than eased by the DSC-011 work. `conda.rs` now parses MatchSpec
+properly, so `python=3.9.*` is a well-formed `Wildcard` being compared against
+PyPI's unrelated `python` package - the garbage is better-formed garbage. The
+fix did leave a ready-made discriminator: conda dependencies now carry
+`section: Some("dependencies")` or `Some("dependencies.pip")`, so `main.rs` can
+route or exclude conda-channel packages without re-parsing anything.
 
 ## DSC-007 - npm range syntax the parser cannot model is silently reinterpreted, then rewritten
 
@@ -149,22 +137,6 @@ A real npm range parser is still the fix. Routing the `Err` path to `Complex`
 would at least convert a disappearance into a visible un-actionable row, but
 only the display change makes either honest.
 
-## DSC-008 - ncu dedups by name globally, dropping workspace members and cross-table duplicates
-
-Reported by ncu.
-
-`main.rs` does `all_deps.retain(|d| seen.insert(d.name.clone()))` - first
-occurrence wins, across all detected `package.json` files and all four tables.
-
-- In a workspace, `lodash@^3` in `packages/a` and `lodash@^4` in `packages/b`:
-  only one is checked, only that file's entry is considered by the updater, and
-  the other member is never reported as outdated. The README says "Supports
-  workspaces".
-- Two different ranges for one name produce one check, whose result is then
-  written to all tables and files (UPD-004).
-
-pcu has the same defect shape across optional-dependency groups: see DSC-012.
-
 ## DSC-009 - ncu queries `npm:` aliases under the wrong name, violating a documented contract
 
 Reported by ncu.
@@ -177,88 +149,39 @@ local key." `parsers/package_json.rs` skips `git`/`file:`/`link:`/`workspace:`/
 worse, a real unrelated package. Also unhandled and sent to the registry: pnpm
 `catalog:`, yarn berry `patch:`/`portal:`/`exec:`.
 
-## DSC-010 - ncu's three lock-file parsers use three different tie-break rules
+## DSC-013 - package-name normalization is not PEP 503, and cannot be fixed alone
 
-Reported by ncu.
+Reported by pcu-parsers. Narrowed: every other sub-point is fixed. Includes
+(`-r`/`-c`/`--requirement`/`--constraint`) are followed with a canonicalized
+visited-set for cycles and a depth bound, each dependency keeping its own
+`source_file`; `\` continuations are joined; `--hash` tokens stripped; inline
+comments cut only at a whitespace-preceded `#` so `#egg=` and `#sha256=`
+survive; bare URLs and `name @ url` are reported as direct references and
+skipped rather than becoming package names; marker-differentiated duplicates are
+both kept on their own lines.
 
-- `parse_package_lock` (v7+) keys on the path after stripping one
-  `node_modules/` prefix and inserts; hoisted duplicates resolve by map
-  iteration order.
-- `parse_yarn_lock` uses `entry().or_insert()` - *first* wins.
-- `parse_pnpm_lock` uses `insert` for `packages` (last wins) then `or_insert`
-  for `snapshots`.
+What remains is the normalization rule, and the reason it is still filed is that
+**tightening it in one place is a regression, not a fix.**
+`pep508::normalize_name` deliberately implements the current rule (lowercase +
+`_`->`-`) rather than PEP 503's `re.sub(r"[-_.]+", "-", name).lower()`, because
+`pcu/src/parsers/lockfiles.rs` folds only `_` at three sites. Tightening the
+parser alone would turn `zope.interface` into `zope-interface` while the lock
+file still produces `zope.interface`, so every dotted distribution would start
+reporting as uninstalled.
 
-None of them resolves "which copy satisfies the root dependency's range", which
-is what severity is computed against. `package-lock.json`'s root `""` entry
-records the declared ranges and would allow doing this correctly.
+The rule now lives in exactly one function with that cross-file constraint in
+its doc comment. Upgrading it means changing that function and those three
+lock-file sites in one commit.
 
-## DSC-011 - Conda `==` pinning degrades to "no constraint", plus the rest of MatchSpec
+The following sub-points were also refused, with reasons at the sites: `-e
+git+...#egg=name` is not resolved against PyPI, because an editable VCS install
+is by definition not taken from PyPI (same class of error as DSC-004); it is now
+skipped by an explicit arm rather than the blanket `starts_with('-')` that also
+ate the include directives.
 
-Reported by pcu-parsers.
-
-`parse_conda_dependency` checks `>=`, `<=`, `!=`, `>`, `<`, then plain `=`. For
-the legal conda form `numpy==1.24.0`, `find('=')` hits the first `=`, so
-`version_str = "=1.24.0"` and it builds `"===1.24.0"`; `VersionSpec::parse`
-strips `==`, `Version::from_str("=1.24.0")` fails, and the `Err(_)` arm returns
-**`VersionSpec::Any`**. A hard pin is reported as unconstrained.
-
-In the same function:
-
-- Every failure path collapses to `Any` (claims the file said nothing), whereas
-  `requirements.rs` falls back to `Complex(raw)` (preserves the text). Opposite
-  lies about the same failure.
-- Conda `=` is a *prefix* match (`numpy=1.24` means 1.24.*) but is mapped to
-  `Pinned`, which is rewritable - so `-u` rewrites prefix pins as exact ones.
-- Build strings (`numpy=1.24.0=py39h1234`) are not modelled: the patch fails to
-  parse, silently becomes 0, and the build string stays in `Version.original`,
-  which is what `Display` prints.
-- Channel-qualified specs (`conda-forge::numpy=1.24`) keep the channel in the
-  package name. Space-separated MatchSpec (`numpy 1.24.0 py39_0`) has no
-  operator, so the whole string becomes the package name.
-- Conda names are lowercased but not `_`->`-` normalized, unlike everywhere
-  else, so `typing_extensions` in a conda pip section never matches the
-  `typing-extensions` key produced elsewhere.
-
-## DSC-012 - pyproject: unparsed dependencies vanish, and whole sections are unread
-
-Reported by pcu-parsers.
-
-- `parse_poetry_dependency` and `parse_dependency_string` both end
-  `VersionSpec::parse(...).ok()?`, so a spec the parser does not model (PEP 440
-  epoch `1!2.0`, multi-clause, `===`) makes the dependency disappear from the
-  report with no warning. Poetry multi-constraint arrays
-  (`pkg = [{version=...},{version=...}]`) and git/path tables also return `None`
-  silently. `requirements.rs` at least keeps them as `Complex`.
-- No handling of `[tool.uv]` at all: `[tool.uv.dev-dependencies]` (array, widely
-  used pre-PEP-735) and `[tool.uv.sources]` are ignored, so a uv project's dev
-  deps are silently missing while the tool prints "uv" as the detected manager.
-  Also unread: `[build-system].requires`, `[tool.setuptools.dynamic]`, and PEP
-  508 direct references (`name @ git+https://...` becomes a package literally
-  named that).
-- Dedup by name across all sections (`retain(|d| seen.insert(name))`) discards
-  the distinct constraints in different optional-dependency groups; the
-  surviving entry's line number is the first occurrence, so `-u` updates one of
-  N occurrences and leaves the others stale.
-
-## DSC-013 - requirements.txt: whole categories of line dropped without a word
-
-Reported by pcu-parsers.
-
-- `-r`/`-c` includes are not followed, so `requirements/base.txt` layouts yield
-  nothing; the detector does not recurse to find them either (DSC-018).
-- `-e .`, `-e git+...` and any `--hash`/`--find-links` continuation are dropped
-  by the blanket `starts_with('-')`.
-- Line continuations (`\`) are not joined; the trailing backslash lands inside
-  the version string and the spec degrades to `Complex`.
-- Bare URL requirements and `name @ url` are turned into package "names".
-- Inline-comment stripping cuts at the first `#` anywhere (PEP 508 requires
-  ` #`), so `#egg=` and `#sha256=` fragments truncate the line.
-- Environment markers are discarded, so `pkg==1.0; python_version<'3.8'` and
-  `pkg==2.0; python_version>='3.8'` produce two same-named entries with
-  different pins and nothing reconciles them.
-- Name normalization does lowercase + `_`->`-` but not `.`->`-` and no run
-  collapsing, so it is not PEP 503: `zope.interface` and `foo--bar` produce keys
-  that will not match registry or lock-file keys.
+The precise rule not yet implemented: `.`->`-` and run collapsing, so that
+`zope.interface` and `foo--bar` produce keys matching registry and lock-file
+keys.
 
 ## DSC-014 - pcu's `can_parse` claims lock formats `parse` does not handle
 
@@ -279,15 +202,34 @@ the dependency looks uninstalled. `PdmLockFile`/`PdmPackage` are byte-for-byte
 duplicates of `TomlLockFile`/`TomlPackage`, and the three parse functions are
 the same function three times.
 
-## DSC-015 - ncu does not support bun's text lock file, and says nothing
+The duplicate-name half has a settled answer to copy, and the order of its steps
+is the whole point. `ncu`'s lock-file parsers now take, in order: the root
+project's *own resolved copy* where the format states it (npm and bun place the
+root's deps at top level by construction; pnpm's `importers["."]` names the
+resolution outright), then the highest candidate satisfying the root's declared
+range, then the highest of all.
 
-Reported by ncu.
+Steps 2 and 3 are fallbacks, not the rule. Getting this wrong is easy and was
+gotten wrong once already in this wave: "highest satisfying the declared range"
+alone picks a nested copy whenever a transitive dependency pulled in something
+newer than the root's hoisted copy, which is not what the root actually gets.
 
-`detect_lockfile` knows `bun.lockb` but not bun's newer text `bun.lock`;
-`parse_bun_lock` returns an empty map, so with a bun project every dep silently
-falls back to the spec's base version with no warning that "installed" is a
-guess. The README's "(bun.lockb detection only)" is honest, but the tool itself
-says nothing at runtime.
+Its three normalization sites (`.to_lowercase().replace('_', "-")`) should also
+call `pep508::normalize_name` rather than open-coding the rule - that is the
+precondition for DSC-013's remaining half.
+
+## DSC-015 - binary `bun.lockb` still cannot be read
+
+Reported by ncu. Closed except for the binary format. Text `bun.lock` is parsed
+and wired through the detector; `bun.lockb` now warns on stderr naming the
+consequence and the remedy instead of returning an empty map silently.
+
+Residue is only the binary format itself, which is a real decoding job and may
+never be worth it now that bun emits text lock files on request. The honest
+warning may be the permanent answer.
+
+The ncu README's "(bun.lockb detection only)" is now wrong in the other
+direction and should be updated to say text `bun.lock` is read.
 
 ## DSC-016 - ccu emits workspace-inherited deps once per inheriting member
 
@@ -301,54 +243,75 @@ via the `seen` HashSet in `main.rs`, but the JSON `checks` array does not - a
 updater also rewrites the same root line N times (harmless, but N file
 parses/writes of redundant work per run).
 
-## DSC-017 - pcu's detector is top-directory only and order-dependent
+## DSC-017 - closed, with the recursion sub-point adjudicated against
 
-Reported by pcu-parsers.
+Reported by pcu-parsers. Three of four fixed in `pcu/src/detector.rs`:
+`requirements*.txt` are `is_file`-filtered and sorted before being pushed, so
+table order and which-duplicate-wins are deterministic; `environment.y[a]ml`
+gained the same `is_file` check; and the failure policy is uniform - an
+unreadable pyproject and a failed `read_dir` both warn on stderr and continue,
+neither aborting the run.
 
-- No recursion: `requirements/*.txt`, `src/<pkg>/pyproject.toml` and monorepo
-  members are invisible. ccu recurses workspaces; pcu does not, and the README's
-  claim does not qualify this.
-- `fs::read_dir` order is unspecified, so the order of detected
-  `requirements*.txt` files - and therefore the output table order and which
-  duplicate wins downstream - varies run to run.
-- No `is_file` check, so a *directory* named `requirements-x.txt` is "detected"
-  and then fails to read.
-- The `?` on `fs::read_to_string(pyproject_path)` aborts the whole run on one
-  unreadable file, while the requirements scan swallows `read_dir` errors.
-  Inconsistent failure policy.
+The recursion sub-point was **refused, and should not be re-hunted.** pcu
+resolves installed versions from a single project-root lock file and prints one
+set of sync commands per run. A nested `pyproject.toml` is a sibling
+distribution with its own lock and its own manager, so discovering it would
+merge unrelated dependency sets into one table and resolve them against the
+wrong lock. It would also need an exclusion policy (`.venv`, `site-packages`,
+`node_modules`, `.git`, build trees) and a depth bound, or a repo with a
+vendored virtualenv detects hundreds of files. The reasoning is a block comment
+above the detector tests.
 
-## DSC-018 - pcu's package-manager sniffing gates parsing, and gets it wrong both ways
+Documentation consequence still outstanding: the pcu README claims recursive
+discovery. It should be reconciled with top-level-only discovery, and ideally
+note the now-deterministic ordering.
 
-Reported by pcu-parsers. See UPD-013 for the same detection being wrong in the
-updater.
+## DSC-020 - `parse::<toml::Value>()` does not round-trip a manifest
 
-`detect_pyproject_manager` does raw substring matching on file text:
-`[tool.poetry]` inside a comment or string counts; a valid Poetry file with only
-`[tool.poetry.dependencies]` and no bare `[tool.poetry]` header is not matched;
-`[tool.pdm.dev-dependencies]` does not contain the literal `[tool.pdm]`, so a
-dev-deps-only PDM project is not PDM.
+Lateral finding from the DSC-018 work, recorded because it is an easy trap.
 
-When it falls through to `Ok(None)` the **pyproject.toml is dropped from
-`detected_files` entirely** and none of its dependencies are ever parsed - e.g.
-a file with only `[dependency-groups]` and no `[project]`, which
-`parse_dependency_groups` would otherwise handle fine. Unknown-but-has-`[project]`
-defaults to `Uv`, so a plain pip/setuptools project is told to run `uv lock`.
+In toml 1.x, `FromStr for Value` is implemented over the *value* deserializer,
+not the document parser, so parsing a whole manifest that way gives nonsense -
+`[tool.poetry]` comes back as an array and the `tool` key is absent. The correct
+call is `toml::from_str::<toml::Table>(&contents)`.
 
-The hunter's recommendation: parse `pyproject.toml` unconditionally when it
-exists, with manager detection as a label rather than a gate.
+No site in pcu, ccu, ncu or core does this today (grepped), so there is nothing
+to fix; the note exists so the next person writing a manifest classifier does
+not rediscover it. A comment naming it sits at the `classify_pyproject` call
+site.
 
 ## Structural recommendation, as filed by the hunters
 
-pcu-parsers argues DSC-004 through DSC-014 are not independently patchable
-without repeating the exercise, and proposes: one real PEP 508 requirement
-parser shared by requirements.txt, pyproject arrays and the conda `pip:` section,
-returning name + extras + full multi-clause specifier set + marker as structured
-data; a real PEP 440 type in `core` (see the VER document); a separate conda
-MatchSpec parser with a channel-aware resolver, or dropping the conda claim
-until one exists; span-based source locations instead of fabricated line numbers
-(UPD-008); and unconditional pyproject parsing.
+pcu-parsers argued its half was not independently patchable without repeating
+the exercise. Most of that programme has now landed:
+
+- The shared PEP 508 requirement parser exists as `pcu/src/parsers/pep508.rs`
+  and all three call sites route through it. The argument that carried it is
+  worth preserving: the three splitters disagreed with each other on the *same
+  input string*, and each disagreement was one rule guessed rather than stated.
+  Stating the rule - a name is `alnum (alnum | - | _ | .)* alnum`, everything
+  after it opaque - makes the operator-ordering bug unrepresentable, turns
+  `[extras]` into a position rather than a truncation point, and yields markers,
+  direct references and multi-clause specifier sets for free.
+- The conda MatchSpec parser exists. The channel-aware *resolver* does not, so
+  the DSC-004 question (write one, or drop the conda claim) is still open and is
+  now the whole of that entry.
+- Unconditional pyproject parsing has landed.
+- A real PEP 440 type in `core` has not; see the VER document.
+- Span-based source locations have not. The fabricated line numbers are gone -
+  both the conda `idx + 2` and pyproject's whole-file substring search - but
+  what replaced them is still a line number, and "real dependency, location
+  unproven" is currently spelled `usize::MAX`. See UPD-008.
 
 ncu argues for a real npm range parser in `ncu` that parses the full grammar
 (`||`, space-AND, hyphen ranges, `x` ranges, dist-tags, protocol specifiers) into
 a structure, rewrites only the comparator it is allowed to touch, and refuses to
-rewrite anything it did not fully understand (DSC-007, UPD-002).
+rewrite anything it did not fully understand (DSC-007). That has not landed, and
+wave 1 made the *write* end safe without it, so what is left is the reporting
+end: rows ncu cannot act on are still displayed as if it could.
+
+A lateral gap found while fixing DSC-010, not filed elsewhere: ncu's yarn header
+parser cannot distinguish protocol entries (`pkg@npm:...`, `pkg@workspace:^`,
+`pkg@patch:...`) from ranges, because `extract_package_name` splits on the first
+`@` regardless. Berry lock files therefore contribute `workspace:` self-entries
+as resolution candidates.

@@ -225,13 +225,19 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         return Ok(());
     }
 
-    // Deduplicate by package name (keep first occurrence)
+    // Deduplicate by declaration site, not by package name. The same package may be
+    // declared in several workspace members, or in both `dependencies` and
+    // `devDependencies` of one manifest, each with its own range. Collapsing those by
+    // name reported only the first and silently hid the rest.
     let mut seen = HashSet::new();
-    all_deps.retain(|d| seen.insert(d.name.clone()));
+    all_deps.retain(|d| seen.insert((d.source_file.clone(), d.section.clone(), d.name.clone())));
 
-    // Query npm registry
+    // Query npm registry. The registry answer is per package, so ask once per distinct
+    // name even though several declarations may share it.
     let client = NpmClient::new(args.pre_release);
-    let package_names: Vec<String> = all_deps.iter().map(|d| d.name.clone()).collect();
+    let mut package_names: Vec<String> = all_deps.iter().map(|d| d.name.clone()).collect();
+    package_names.sort();
+    package_names.dedup();
 
     let progress = ProgressBar::new(package_names.len() as u64);
     progress.set_style(
@@ -288,9 +294,25 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     // In update mode only list what the severity filter will actually write,
     // so -u/-um never claim to have applied a major bump they skipped.
+    //
+    // Dependencies are tracked per declaration site, so the same package declared in two
+    // workspace members produces two checks. Collapse rows that agree on name and target
+    // (matching ccu), so only genuinely different ranges show up as separate rows.
+    let mut seen_rows: HashSet<String> = HashSet::new();
     let to_render: Vec<&DependencyCheck> = checks
         .iter()
         .filter(|c| c.has_update() && (!args.update || c.will_update(args.minor, args.force)))
+        .filter(|c| {
+            let key = format!(
+                "{}:{}",
+                c.dependency.name,
+                c.target
+                    .as_ref()
+                    .map(std::string::ToString::to_string)
+                    .unwrap_or_default()
+            );
+            seen_rows.insert(key)
+        })
         .collect();
 
     // Updates that exist but fall outside the requested severity filter

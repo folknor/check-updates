@@ -122,9 +122,8 @@ impl CargoTomlParser {
                 };
 
                 let line_content = effective_content.as_deref().unwrap_or(content);
-                let original_line = line_content
-                    .lines()
-                    .nth(line_number.saturating_sub(1))
+                let original_line = line_number
+                    .and_then(|n| line_content.lines().nth(n.saturating_sub(1)))
                     .unwrap_or("")
                     .to_string();
 
@@ -231,8 +230,13 @@ impl CargoTomlParser {
         }
     }
 
-    /// Find the line number for a dependency
-    fn find_line_number(&self, content: &str, name: &str, _version: &str) -> usize {
+    /// Find the line number for a dependency.
+    ///
+    /// `None` when no line declares the key. ccu's updater edits through
+    /// `toml_edit`, not by line, so this is display and JSON data only - but
+    /// it must still be honest: the previous fallback of `1` reported the
+    /// `[package]` header as the location of every unlocated dependency.
+    fn find_line_number(&self, content: &str, name: &str, _version: &str) -> Option<usize> {
         for (idx, line) in content.lines().enumerate() {
             let trimmed = line.trim();
             // Match lines like: name = "version" or name = { version = "..." }
@@ -240,11 +244,11 @@ impl CargoTomlParser {
                 // Make sure it's not a substring match
                 let after_name = &trimmed[name.len()..].trim_start();
                 if after_name.starts_with('=') || after_name.starts_with('.') {
-                    return idx + 1;
+                    return Some(idx + 1);
                 }
             }
         }
-        1 // Default to line 1 if not found
+        None
     }
 }
 
@@ -283,12 +287,7 @@ impl DependencyParser for CargoTomlParser {
         if let Some(workspace) = parsed.get("workspace").and_then(|v| v.as_table())
             && let Some(deps) = workspace.get("dependencies").and_then(|v| v.as_table())
         {
-            all_deps.extend(self.parse_deps_table(
-                deps,
-                path,
-                &content,
-                "workspace.dependencies",
-            ));
+            all_deps.extend(self.parse_deps_table(deps, path, &content, "workspace.dependencies"));
         }
 
         // Parse [target.'cfg(...)'.dependencies]

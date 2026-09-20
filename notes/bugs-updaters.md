@@ -79,27 +79,27 @@ format-aware through `toml_edit` requires addressing a dependency as (table
 path, key), which `Dependency` does not carry: `manifest_key` is a Cargo-rename
 field and the new `section` is a table *name*, not a path to an array element.
 
-**Blocked on UPD-008.** While `pyproject.rs::find_line_in_content` returns a
-fuzzy substring hit and a synthesized line-1 fallback, a format-aware editor
-would only be a more confident way to edit the wrong node.
+No longer blocked. The reason to wait was that
+`pyproject.rs::find_line_in_content` returned a fuzzy substring hit with a
+synthesized line-1 fallback, so a format-aware editor would only have been a
+more confident way to edit the wrong node. That function is gone, locations are
+now anchored, and an unproven location is `None` rather than a guess. What
+remains is the structural change itself.
 
 ## UPD-008 - Fabricated and fuzzy line numbers feed a line-index rewriter
 
-Reported by pcu-parsers (pcu), ccu (ccu), ncu (ncu). `pcu/src/updater.rs`
-indexes `lines[line_number - 1]` and rewrites in place, so in pcu this is
-actively dangerous rather than merely cosmetic.
+Reported by pcu-parsers (pcu), ccu (ccu), ncu (ncu). The pcu half - the only one
+where the updater actually consumes the number - is fixed. Both fabricators are
+gone: conda's `idx + 2` is replaced by a forward-only cursor over the raw YAML
+that walks in step with the parsed sequence (exact lines, including `pip:`
+nesting, with repeated items resolving to distinct lines), and pyproject's
+whole-file `find_line_in_content` is deleted in favour of locating array items
+by their quoted literal with an occurrence counter, and Poetry keys by `key =`
+*inside the named table's span*, skipping comment lines.
 
-- `pcu/src/parsers/conda.rs` invents `line_number = idx + 2` from the array
-  index, ignoring `name:`/`channels:` blocks entirely. In its own test fixture
-  the first dep is at file line 6 and gets 2. `-u` on an `environment.yml`
-  therefore rewrites arbitrary lines, guarded only by
-  `line.replace(old_spec, new_spec)` no-op'ing when nothing matches.
-- `pcu/src/parsers/pyproject.rs::find_line_in_content` is a case-insensitive
-  substring search over the whole file: it matches comments, the `name = "..."`
-  key, and longer packages containing the shorter one (`requests` matches
-  `requests-oauthlib`, `pytest` matches `pytest-cov`). First match wins.
-  Fallback is line 1 with a synthesized `pkg = "spec"` string that never existed
-  in the file.
+Two halves remain, both in tools whose updater does not consume the number, so
+these are `--json` correctness rather than data loss:
+
 - `ccu/src/parsers/cargo_toml.rs::find_line_number` matches the first line whose
   trimmed text starts with the name followed by `=` or `.`, so a `[features]`
   entry like `tokio = []` earlier in the file wins over the real dependency
@@ -107,10 +107,22 @@ actively dangerous rather than merely cosmetic.
   per member (O(members x deps) file reads).
 - `ncu`'s `find_line_number` returns the first line containing `"<name>"`
   anywhere - the `"name"` field, a `scripts` entry, an `overrides`/`resolutions`
-  block - falling back to 1.
+  block - falling back to 1. (Note ncu's updater no longer needs it at all: it
+  locates the value by byte span.)
 
-All four are serialized into `--json` as fact. In ccu and ncu the updater does
-not use them (luckily); in pcu it does.
+"Real dependency, location unproven" is now expressible:
+`Dependency::line_number` is `Option<usize>` with `skip_serializing_if`, so an
+unknown location is omitted from `--json` rather than shipped as a sentinel. The
+pcu updater skips `None` before its bounds guard. Two *other* fabricated
+fallbacks fell out with it - `find_line_number` in both
+`ccu/src/parsers/cargo_toml.rs` and `ncu/src/parsers/package_json.rs` returned
+`1` when they found nothing, so ccu reported the `[package]` header line for
+every workspace-inherited dep.
+
+The remaining ask is the byte span. It is deliberately a wave of its own: it
+changes `core::Dependency`, all three parser families and all three updaters,
+and the line-number half is now honest enough that nothing is bleeding while it
+waits.
 
 ## UPD-009 - ncu and ccu still write manifests non-atomically
 
@@ -132,15 +144,6 @@ Reported by ccu.
 In non-JSON update mode the table is rendered before `apply_updates` is called.
 If the write fails (read-only file, TOML parse failure) the process has already
 claimed success, then errors out.
-
-## UPD-013 - pcu's post-update advice names the wrong package manager
-
-Reported by pcu-runtime.
-
-`detect_package_manager` returns `PackageManager::Uv` for any `pyproject.toml`
-(acknowledged by its own comment), so a Poetry or PDM project is told to
-`Run uv lock to sync dependencies`. Wrong, actionable-looking advice. See also
-DSC-018, where the detector's manager sniffing is wrong in the other direction.
 
 ## UPD-014 - `[target.*.build-dependencies]` is handled by neither parser nor updater
 

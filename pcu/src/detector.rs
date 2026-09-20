@@ -41,40 +41,76 @@ impl ProjectDetector {
     }
 
     /// Detect all dependency files in the project
+    ///
+    /// Discovery is deliberately non-recursive: it looks only at the top level
+    /// of `project_path`. See the note on `detect` in the module tail for why a
+    /// recursive walk is not a local change.
     pub fn detect(&self) -> anyhow::Result<Vec<DetectedFile>> {
         let mut detected_files = Vec::new();
 
-        // Check for pyproject.toml and determine which package manager
+        // pyproject.toml is always parsed when it exists. The package manager
+        // is only a *label* used for post-update sync advice; it must never
+        // decide whether the file's dependencies get read at all. A file with
+        // only `[dependency-groups]`, or a plain setuptools project, still has
+        // dependencies worth reporting.
         let pyproject_path = self.project_path.join("pyproject.toml");
-        if pyproject_path.exists()
-            && let Some(pm) = self.detect_pyproject_manager(&pyproject_path)?
-        {
-            detected_files.push(DetectedFile {
-                path: pyproject_path,
-                package_manager: pm,
-            });
-        }
-
-        // Check for requirements*.txt files (pip)
-        if let Ok(entries) = fs::read_dir(&self.project_path) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(filename) = path.file_name() {
-                    let filename_str = filename.to_string_lossy();
-                    if filename_str.starts_with("requirements") && filename_str.ends_with(".txt") {
-                        detected_files.push(DetectedFile {
-                            path: path.clone(),
-                            package_manager: PackageManager::Pip,
-                        });
-                    }
+        if pyproject_path.is_file() {
+            match classify_pyproject(&pyproject_path) {
+                Ok(pm) => detected_files.push(DetectedFile {
+                    path: pyproject_path,
+                    package_manager: pm,
+                }),
+                // Failure policy: an unreadable individual file is a warning,
+                // not an abort. Previously the `?` here killed the whole run
+                // while `read_dir` errors below were swallowed silently.
+                Err(err) => {
+                    eprintln!(
+                        "warning: could not read {}: {err}",
+                        pyproject_path.display()
+                    );
                 }
             }
         }
 
-        // Check for conda environment files
+        // requirements*.txt (pip). `read_dir` yields entries in unspecified
+        // order, so collect and sort: the output table order and which
+        // duplicate definition wins downstream must not vary between runs.
+        match fs::read_dir(&self.project_path) {
+            Ok(entries) => {
+                let mut requirement_files: Vec<PathBuf> = Vec::new();
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let Some(filename) = path.file_name() else {
+                        continue;
+                    };
+                    let filename_str = filename.to_string_lossy();
+                    if filename_str.starts_with("requirements")
+                        && filename_str.ends_with(".txt")
+                        && path.is_file()
+                    {
+                        requirement_files.push(path);
+                    }
+                }
+                requirement_files.sort();
+                for path in requirement_files {
+                    detected_files.push(DetectedFile {
+                        path,
+                        package_manager: PackageManager::Pip,
+                    });
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "warning: could not list {}: {err}",
+                    self.project_path.display()
+                );
+            }
+        }
+
+        // Conda environment files.
         for filename in &["environment.yml", "environment.yaml"] {
             let conda_path = self.project_path.join(filename);
-            if conda_path.exists() {
+            if conda_path.is_file() {
                 detected_files.push(DetectedFile {
                     path: conda_path,
                     package_manager: PackageManager::Conda,
@@ -83,44 +119,6 @@ impl ProjectDetector {
         }
 
         Ok(detected_files)
-    }
-
-    /// Detect which package manager uses pyproject.toml
-    fn detect_pyproject_manager(
-        &self,
-        pyproject_path: &Path,
-    ) -> anyhow::Result<Option<PackageManager>> {
-        let contents = fs::read_to_string(pyproject_path)?;
-
-        // Check for lock files to disambiguate
-        let uv_lock = self.project_path.join("uv.lock");
-        let poetry_lock = self.project_path.join("poetry.lock");
-        let pdm_lock = self.project_path.join("pdm.lock");
-
-        // Check for tool sections in pyproject.toml
-        let has_poetry_section = contents.contains("[tool.poetry]");
-        let has_pdm_section = contents.contains("[tool.pdm]");
-
-        // Determine package manager based on lock files and tool sections
-        if poetry_lock.exists() || has_poetry_section {
-            Ok(Some(PackageManager::Poetry))
-        } else if pdm_lock.exists() || has_pdm_section {
-            Ok(Some(PackageManager::Pdm))
-        } else if uv_lock.exists() {
-            Ok(Some(PackageManager::Uv))
-        } else {
-            // If no lock file exists but pyproject.toml has dependencies,
-            // default to uv (PEP 621 standard)
-            if contents.contains("[project]")
-                && (contents.contains("dependencies")
-                    || contents.contains("[project.dependencies]"))
-            {
-                Ok(Some(PackageManager::Uv))
-            } else {
-                // No recognizable package manager
-                Ok(None)
-            }
-        }
     }
 
     /// Get the sync command to run after updating
@@ -134,6 +132,82 @@ impl ProjectDetector {
         }
     }
 }
+
+/// Label the package manager that owns a `pyproject.toml`.
+///
+/// This is a *label*, never a gate: every `pyproject.toml` is parsed for
+/// dependencies regardless of what this returns. The label drives the
+/// post-update sync advice ("Run `poetry lock` ..."), so it must be right for
+/// that purpose and nothing more.
+///
+/// Tool tables are read through a real TOML parse rather than substring search,
+/// so `[tool.poetry.dependencies]` with no bare `[tool.poetry]` header counts,
+/// `[tool.pdm.dev-dependencies]` counts, and the words `[tool.poetry]` inside a
+/// comment or a string do not.
+///
+/// Precedence: an explicit tool table beats a lock file, because the lock file
+/// may be a leftover from a manager the project has since migrated away from.
+///
+/// `Err` is returned only when the file cannot be read; a *syntactically*
+/// invalid file still gets a label, since the dependency parser reports the
+/// syntax error with better context than the detector could.
+pub fn classify_pyproject(pyproject_path: &Path) -> anyhow::Result<PackageManager> {
+    let contents = fs::read_to_string(pyproject_path)?;
+    let dir = pyproject_path.parent().unwrap_or(Path::new("."));
+
+    // Note: `contents.parse::<toml::Value>()` is NOT the same thing as parsing a
+    // document - toml 1.x implements `FromStr for Value` in terms of the *value*
+    // deserializer, so a whole manifest parses as a bare value (and
+    // `[tool.poetry]` comes back as an array). Deserialize a `toml::Table`.
+    let tool_table = toml::from_str::<toml::Table>(&contents)
+        .ok()
+        .and_then(|doc| doc.get("tool").and_then(toml::Value::as_table).cloned());
+
+    if let Some(tool) = &tool_table {
+        if tool.contains_key("poetry") {
+            return Ok(PackageManager::Poetry);
+        }
+        if tool.contains_key("pdm") {
+            return Ok(PackageManager::Pdm);
+        }
+        if tool.contains_key("uv") {
+            return Ok(PackageManager::Uv);
+        }
+    }
+
+    if dir.join("poetry.lock").is_file() {
+        return Ok(PackageManager::Poetry);
+    }
+    if dir.join("pdm.lock").is_file() {
+        return Ok(PackageManager::Pdm);
+    }
+    if dir.join("uv.lock").is_file() {
+        return Ok(PackageManager::Uv);
+    }
+
+    // Nothing declares an owner. PEP 621 projects are most commonly driven by
+    // uv today, and `uv lock` is the least destructive of the candidate
+    // suggestions, so it stays the fallback. A dedicated "unknown / PEP 621"
+    // label would be more honest, but adding an enum variant means revisiting
+    // every exhaustive match on `PackageManager`, including the sync-advice
+    // tables in `pcu/src/updater.rs`.
+    Ok(PackageManager::Uv)
+}
+
+// Recursive discovery: deliberately NOT implemented here.
+//
+// Making `detect` walk subdirectories is not a detector-local change. pcu
+// resolves installed versions from a single project-root lock file
+// (`LockfileParser::find_and_parse(&project_path)` in `main.rs`) and prints one
+// set of sync commands for the whole run; nested `pyproject.toml` files belong
+// to sibling distributions with their own lock files and their own managers, so
+// discovering them would merge unrelated dependency sets into one table and
+// resolve them against the wrong lock. A recursive walk also needs an exclusion
+// policy (`.venv`, `site-packages`, `node_modules`, `.git`, build trees) and a
+// depth bound, or a single run over a repo with vendored environments detects
+// hundreds of files. This
+// one needs a design decision about what "the project" means for pcu, not a
+// patch.
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -331,6 +405,120 @@ mod tests {
 
         assert_eq!(detected.len(), 1);
         assert_eq!(detected[0].package_manager, PackageManager::Poetry);
+    }
+
+    #[test]
+    fn test_pyproject_without_recognizable_manager_is_still_detected() {
+        // A dependency-groups-only file has no [project] and no tool
+        // table. It must still reach the parser.
+        let temp_dir = TempDir::new().unwrap();
+        let pyproject_path = temp_dir.path().join("pyproject.toml");
+        fs::write(&pyproject_path, "[dependency-groups]\ndev = [\"pytest\"]\n").unwrap();
+
+        let detector = ProjectDetector::new(temp_dir.path().to_path_buf());
+        let detected = detector.detect().unwrap();
+
+        assert_eq!(detected.len(), 1);
+        assert_eq!(detected[0].path, pyproject_path);
+    }
+
+    #[test]
+    fn test_poetry_detected_from_subtable_only() {
+        let temp_dir = TempDir::new().unwrap();
+        let pyproject_path = temp_dir.path().join("pyproject.toml");
+        fs::write(
+            &pyproject_path,
+            "[tool.poetry.dependencies]\nrequests = \"^2.28\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            classify_pyproject(&pyproject_path).unwrap(),
+            PackageManager::Poetry
+        );
+    }
+
+    #[test]
+    fn test_pdm_detected_from_dev_dependencies_only() {
+        let temp_dir = TempDir::new().unwrap();
+        let pyproject_path = temp_dir.path().join("pyproject.toml");
+        fs::write(
+            &pyproject_path,
+            "[tool.pdm.dev-dependencies]\ntest = [\"pytest\"]\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            classify_pyproject(&pyproject_path).unwrap(),
+            PackageManager::Pdm
+        );
+    }
+
+    #[test]
+    fn test_poetry_mention_in_comment_is_not_poetry() {
+        let temp_dir = TempDir::new().unwrap();
+        let pyproject_path = temp_dir.path().join("pyproject.toml");
+        fs::write(
+            &pyproject_path,
+            "# migrated away from [tool.poetry]\n[project]\nname = \"x\"\ndependencies = []\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            classify_pyproject(&pyproject_path).unwrap(),
+            PackageManager::Uv
+        );
+    }
+
+    #[test]
+    fn test_requirements_order_is_deterministic() {
+        let temp_dir = TempDir::new().unwrap();
+        for name in [
+            "requirements-dev.txt",
+            "requirements.txt",
+            "requirements-a.txt",
+        ] {
+            fs::write(temp_dir.path().join(name), "requests\n").unwrap();
+        }
+
+        let detector = ProjectDetector::new(temp_dir.path().to_path_buf());
+        let names: Vec<String> = detector
+            .detect()
+            .unwrap()
+            .iter()
+            .map(|d| d.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            names,
+            vec![
+                "requirements-a.txt".to_string(),
+                "requirements-dev.txt".to_string(),
+                "requirements.txt".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_directory_named_like_requirements_is_ignored() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::create_dir(temp_dir.path().join("requirements-x.txt")).unwrap();
+
+        let detector = ProjectDetector::new(temp_dir.path().to_path_buf());
+        assert!(detector.detect().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_tool_table_beats_stale_lock_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let pyproject_path = temp_dir.path().join("pyproject.toml");
+        fs::write(&pyproject_path, "[tool.uv]\n[project]\nname = \"x\"\n").unwrap();
+        fs::write(temp_dir.path().join("poetry.lock"), "").unwrap();
+
+        assert_eq!(
+            classify_pyproject(&pyproject_path).unwrap(),
+            PackageManager::Uv
+        );
     }
 
     #[test]

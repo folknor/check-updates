@@ -77,13 +77,27 @@ impl ProjectDetector {
     }
 
     /// Expand a workspace member pattern (may contain globs like "crates/*")
+    ///
+    /// Deliberately *not* gitignore-filtered, unlike `auto_discover_members`. The
+    /// asymmetry is intended: auto-discovery guesses at membership and must not adopt
+    /// unrelated vendored checkouts (commit b24f805), whereas an explicit `members` entry
+    /// is the user's declaration of what belongs to the workspace. Cargo itself expands
+    /// member globs with no ignore awareness, and a gitignored-but-listed member is a real
+    /// member whose dependencies we must report. Do not "fix" this to match
+    /// auto-discovery.
     fn expand_workspace_member(&self, pattern: &str) -> Result<Vec<PathBuf>> {
         let mut results = Vec::new();
 
         if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
-            // Handle glob pattern
-            let full_pattern = self.project_path.join(pattern).join("Cargo.toml");
-            let pattern_str = full_pattern.to_string_lossy();
+            // Handle glob pattern. Only the member pattern itself is glob syntax; the
+            // project path was chosen by the user's filesystem, not by the manifest, so a
+            // directory literally named `a[b]` or `v*` must not be reinterpreted as a
+            // pattern. Escape the prefix before splicing the member pattern onto it.
+            let pattern_str = format!(
+                "{}/{}",
+                Self::escape_glob_prefix(&self.project_path),
+                PathBuf::from(pattern).join("Cargo.toml").to_string_lossy()
+            );
 
             let paths = glob::glob(&pattern_str)
                 .with_context(|| format!("Invalid workspace member glob pattern: {pattern}"))?;
@@ -147,16 +161,24 @@ impl ProjectDetector {
 
         for pattern in excludes {
             if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
-                // Glob-based exclude
-                let full_pattern = self.project_path.join(pattern).join("Cargo.toml");
-                if let Ok(glob_pattern) = glob::Pattern::new(&full_pattern.to_string_lossy())
+                // Glob-based exclude. Same escaping rule as expand_workspace_member: the
+                // project path is data, the exclude pattern is syntax.
+                let full_pattern = format!(
+                    "{}/{}",
+                    Self::escape_glob_prefix(&self.project_path),
+                    PathBuf::from(*pattern).join("Cargo.toml").to_string_lossy()
+                );
+                if let Ok(glob_pattern) = glob::Pattern::new(&full_pattern)
                     && glob_pattern.matches_path(path)
                 {
                     return true;
                 }
             } else {
-                // Literal exclude
-                if relative == *pattern {
+                // Literal exclude. Cargo excludes the whole subtree rooted at the pattern,
+                // not just the directory itself: `exclude = ["vendor"]` also excludes
+                // `vendor/foo`. Compare on path components so `vendored` is not treated as
+                // a match for `vendor`.
+                if Self::path_is_within(&relative, pattern) {
                     return true;
                 }
             }
@@ -165,14 +187,110 @@ impl ProjectDetector {
         false
     }
 
-    /// Check if Cargo.lock exists
-    pub fn has_lockfile(&self) -> bool {
-        self.project_path.join("Cargo.lock").exists()
+    /// Escape glob metacharacters in a path that is data, not pattern.
+    ///
+    /// `glob::Pattern::escape` wraps `*`, `?` and `[` in character classes.
+    fn escape_glob_prefix(path: &std::path::Path) -> String {
+        glob::Pattern::escape(&path.to_string_lossy())
     }
 
-    /// Get path to Cargo.lock
+    /// True when `relative` is `pattern` itself or lives underneath it, comparing whole
+    /// path components (so `vendored` does not match `vendor`).
+    fn path_is_within(relative: &str, pattern: &str) -> bool {
+        let rel = std::path::Path::new(relative);
+        let pat = std::path::Path::new(pattern);
+        rel.strip_prefix(pat).is_ok()
+    }
+
+    /// True when `manifest` parses as TOML and carries a `[workspace]` table.
+    fn declares_workspace(manifest: &std::path::Path) -> bool {
+        let Ok(content) = fs::read_to_string(manifest) else {
+            return false;
+        };
+        let Ok(parsed) = toml::from_str::<Value>(&content) else {
+            return false;
+        };
+        parsed.get("workspace").and_then(|v| v.as_table()).is_some()
+    }
+
+    /// Resolve the Cargo workspace root that governs `project_path`.
+    ///
+    /// Cargo resolves `[workspace.dependencies]` and `Cargo.lock` from the workspace root,
+    /// not from the directory the command was run in. Running against a member crate
+    /// (`ccu ccu/`) must therefore still find the root manifest, otherwise every
+    /// `.workspace = true` dependency resolves to nothing and no installed versions are
+    /// available to compare against.
+    ///
+    /// Resolution order, mirroring cargo:
+    /// 1. an explicit `package.workspace = "<path>"` pointer in the local manifest,
+    /// 2. the nearest ancestor manifest with a `[workspace]` table that actually claims
+    ///    this directory as a member,
+    /// 3. `project_path` itself, when nothing above applies.
+    pub fn workspace_root(&self) -> PathBuf {
+        let start =
+            fs::canonicalize(&self.project_path).unwrap_or_else(|_| self.project_path.clone());
+        let manifest = start.join("Cargo.toml");
+
+        // The directory we were pointed at is itself a workspace root.
+        if Self::declares_workspace(&manifest) {
+            return self.project_path.clone();
+        }
+
+        // Explicit `package.workspace` pointer wins over the upward walk.
+        if let Ok(content) = fs::read_to_string(&manifest)
+            && let Ok(parsed) = toml::from_str::<Value>(&content)
+            && let Some(rel) = parsed
+                .get("package")
+                .and_then(|p| p.get("workspace"))
+                .and_then(|v| v.as_str())
+        {
+            let candidate = start.join(rel);
+            let candidate = fs::canonicalize(&candidate).unwrap_or(candidate);
+            if Self::declares_workspace(&candidate.join("Cargo.toml")) {
+                return candidate;
+            }
+        }
+
+        // Walk upward for the nearest workspace root that claims us.
+        for ancestor in start.ancestors().skip(1) {
+            let candidate = ancestor.join("Cargo.toml");
+            if !Self::declares_workspace(&candidate) {
+                continue;
+            }
+            if Self::workspace_claims(ancestor, &start) {
+                return ancestor.to_path_buf();
+            }
+        }
+
+        self.project_path.clone()
+    }
+
+    /// True when the workspace rooted at `root` lists `member_dir` as a member and does
+    /// not exclude it. A bare `[workspace]` with no `members` field auto-discovers, so any
+    /// non-excluded descendant counts.
+    fn workspace_claims(root: &std::path::Path, member_dir: &std::path::Path) -> bool {
+        let root_detector = Self::new(root.to_path_buf());
+        let Ok(detected) = root_detector.detect() else {
+            return false;
+        };
+        let target = member_dir.join("Cargo.toml");
+        detected.iter().any(|d| {
+            d.path == target
+                || fs::canonicalize(&d.path)
+                    .is_ok_and(|p| fs::canonicalize(&target).is_ok_and(|t| p == t))
+        })
+    }
+
+    /// Check if Cargo.lock exists
+    ///
+    /// Looked up at the workspace root: cargo keeps a single lockfile per workspace.
+    pub fn has_lockfile(&self) -> bool {
+        self.lockfile_path().exists()
+    }
+
+    /// Get path to Cargo.lock (at the workspace root, see `workspace_root`)
     pub fn lockfile_path(&self) -> PathBuf {
-        self.project_path.join("Cargo.lock")
+        self.workspace_root().join("Cargo.lock")
     }
 }
 
@@ -271,6 +389,104 @@ mod tests {
         let detector = ProjectDetector::new(tmp.path().to_path_buf());
         let detected = detector.detect()?;
         assert_eq!(detected.len(), 2); // root + crate-a (crate-b excluded)
+        Ok(())
+    }
+
+    #[test]
+    fn test_exclude_covers_subtree() -> Result<()> {
+        let tmp = TempDir::new()?;
+        create_cargo_toml(
+            tmp.path(),
+            "[workspace]\nmembers = [\"vendor/foo\", \"vendored\"]\nexclude = [\"vendor\"]\n",
+        );
+        let vendor_foo = tmp.path().join("vendor").join("foo");
+        fs::create_dir_all(&vendor_foo)?;
+        create_cargo_toml(&vendor_foo, "[package]\nname = \"foo\"\n");
+        fs::create_dir(tmp.path().join("vendored"))?;
+        create_cargo_toml(
+            &tmp.path().join("vendored"),
+            "[package]\nname = \"vendored\"\n",
+        );
+
+        let detector = ProjectDetector::new(tmp.path().to_path_buf());
+        let detected = detector.detect()?;
+        // root + vendored; vendor/foo is inside the excluded subtree, `vendored` is not.
+        assert_eq!(
+            detected.len(),
+            2,
+            "detected: {:?}",
+            detected.iter().map(|d| &d.path).collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_glob_metacharacters_in_project_path_are_literal() -> Result<()> {
+        let tmp = TempDir::new()?;
+        // A project directory whose name contains glob syntax the user did not intend.
+        let root = tmp.path().join("pro[ject]*");
+        fs::create_dir(&root)?;
+        create_cargo_toml(&root, "[workspace]\nmembers = [\"crates/*\"]\n");
+        let crates = root.join("crates");
+        fs::create_dir(&crates)?;
+        fs::create_dir(crates.join("foo"))?;
+        create_cargo_toml(&crates.join("foo"), "[package]\nname = \"foo\"\n");
+
+        let detector = ProjectDetector::new(root);
+        let detected = detector.detect()?;
+        assert_eq!(
+            detected.len(),
+            2,
+            "detected: {:?}",
+            detected.iter().map(|d| &d.path).collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_workspace_root_found_from_member() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let root = fs::canonicalize(tmp.path())?;
+        create_cargo_toml(&root, "[workspace]\nmembers = [\"ccu\"]\n");
+        fs::write(root.join("Cargo.lock"), "version = 3\n")?;
+        let member = root.join("ccu");
+        fs::create_dir(&member)?;
+        create_cargo_toml(&member, "[package]\nname = \"ccu\"\n");
+
+        let detector = ProjectDetector::new(member.clone());
+        assert_eq!(detector.workspace_root(), root);
+        assert!(detector.has_lockfile());
+        assert_eq!(detector.lockfile_path(), root.join("Cargo.lock"));
+
+        // Detection itself stays scoped to the member the user pointed at.
+        assert_eq!(detector.detect()?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_workspace_root_of_root_is_itself() -> Result<()> {
+        let tmp = TempDir::new()?;
+        create_cargo_toml(tmp.path(), "[workspace]\nmembers = [\"a\"]\n");
+        let detector = ProjectDetector::new(tmp.path().to_path_buf());
+        assert_eq!(detector.workspace_root(), tmp.path());
+        Ok(())
+    }
+
+    #[test]
+    fn test_workspace_root_ignores_unrelated_parent_workspace() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let root = fs::canonicalize(tmp.path())?;
+        // A parent workspace that does not claim `standalone`.
+        create_cargo_toml(&root, "[workspace]\nmembers = [\"a\"]\n");
+        fs::create_dir(root.join("a"))?;
+        create_cargo_toml(&root.join("a"), "[package]\nname = \"a\"\n");
+
+        let standalone = root.join("standalone");
+        fs::create_dir(&standalone)?;
+        create_cargo_toml(&standalone, "[package]\nname = \"standalone\"\n");
+
+        let detector = ProjectDetector::new(standalone.clone());
+        assert_eq!(detector.workspace_root(), standalone);
         Ok(())
     }
 

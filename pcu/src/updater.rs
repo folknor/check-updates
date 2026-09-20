@@ -140,7 +140,14 @@ impl FileUpdater {
 
         // Apply each update
         for (check, new_version) in sorted_updates {
-            let line_idx = check.dependency.line_number.saturating_sub(1);
+            // A parser that could not prove where the declaration lives hands
+            // us `None`. There is nothing safe to do with that but leave the
+            // file alone: guessing a line is how the wave-1 findings got
+            // wrong-line rewrites.
+            let Some(line_number) = check.dependency.line_number else {
+                continue;
+            };
+            let line_idx = line_number.saturating_sub(1);
 
             if line_idx >= lines.len() {
                 continue; // Skip if line number is out of bounds
@@ -442,9 +449,11 @@ fn detect_package_manager(path: &Path) -> Option<PackageManager> {
     if file_name.starts_with("requirements") {
         Some(PackageManager::Pip)
     } else if file_name == "pyproject.toml" {
-        // We'd need to read the file to determine if it's uv, poetry, or pdm
-        // For now, default to uv as it's the most common
-        Some(PackageManager::Uv)
+        // A pyproject.toml alone does not say which manager owns the project, and
+        // telling a Poetry or PDM user to run `uv lock` is actively wrong advice.
+        // Read the manifest's tool tables and adjacent lock files instead; fall back
+        // to uv (the most common) only when the file cannot be read at all.
+        Some(crate::detector::classify_pyproject(path).unwrap_or(PackageManager::Uv))
     } else if file_name.starts_with("environment.")
         && (file_name.ends_with(".yml") || file_name.ends_with(".yaml"))
     {
@@ -679,7 +688,7 @@ mod tests {
                 name: "requests".to_string(),
                 version_spec: VersionSpec::Pinned(Version::new(2, 28, 0)),
                 source_file: temp_path.clone(),
-                line_number: 2,
+                line_number: Some(2),
                 original_line: "requests==2.28.0".to_string(),
                 manifest_key: None,
                 section: None,
@@ -716,13 +725,13 @@ mod tests {
         let temp_path = file.path().to_path_buf();
         let before = fs::read_to_string(&temp_path)?;
 
-        // Line number points past the end of the file.
+        // The parser could not locate the declaration.
         let check = DependencyCheck {
             dependency: Dependency {
                 name: "requests".to_string(),
                 version_spec: VersionSpec::Pinned(Version::new(2, 28, 0)),
                 source_file: temp_path.clone(),
-                line_number: 99,
+                line_number: None,
                 original_line: "requests==2.28.0".to_string(),
                 manifest_key: None,
                 section: None,
@@ -763,6 +772,7 @@ mod tests {
             Some(PackageManager::Pip)
         );
 
+        // A pyproject.toml that cannot be read falls back to uv.
         assert_eq!(
             detect_package_manager(&PathBuf::from("/path/to/pyproject.toml")),
             Some(PackageManager::Uv)
@@ -777,6 +787,23 @@ mod tests {
             detect_package_manager(&PathBuf::from("/path/to/poetry.lock")),
             Some(PackageManager::Poetry)
         );
+    }
+
+    #[test]
+    fn test_detect_package_manager_reads_pyproject_tool_table() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+
+        let poetry = tmp.path().join("pyproject.toml");
+        fs::write(&poetry, "[tool.poetry.dependencies]\nrequests = \"^2.28\"\n")?;
+        assert_eq!(detect_package_manager(&poetry), Some(PackageManager::Poetry));
+
+        fs::write(&poetry, "[tool.pdm.dev-dependencies]\ntest = []\n")?;
+        assert_eq!(detect_package_manager(&poetry), Some(PackageManager::Pdm));
+
+        fs::write(&poetry, "[project]\nname = \"x\"\n")?;
+        assert_eq!(detect_package_manager(&poetry), Some(PackageManager::Uv));
+
+        Ok(())
     }
 
     #[test]
@@ -801,7 +828,7 @@ mod tests {
                 name: "requests".to_string(),
                 version_spec: VersionSpec::Pinned(Version::new(2, 28, 0)),
                 source_file: temp_path.clone(),
-                line_number: 1,
+                line_number: Some(1),
                 original_line: "requests==2.28.0".to_string(),
                 manifest_key: None,
                 section: None,
@@ -822,7 +849,7 @@ mod tests {
                 name: "flask".to_string(),
                 version_spec: VersionSpec::Pinned(Version::new(2, 0, 3)),
                 source_file: temp_path.clone(),
-                line_number: 3,
+                line_number: Some(3),
                 original_line: "flask==2.0.3".to_string(),
                 manifest_key: None,
                 section: None,
@@ -878,7 +905,7 @@ mod tests {
                     name: "serde".to_string(),
                     version_spec: VersionSpec::Pinned(Version::new(1, 0, 0)),
                     source_file: temp_path.clone(),
-                    line_number: 1,
+                    line_number: Some(1),
                     original_line: "serde==1.0.0".to_string(),
                     manifest_key: None,
                     section: None,
@@ -899,7 +926,7 @@ mod tests {
                     name: "tokio".to_string(),
                     version_spec: VersionSpec::Pinned(Version::new(1, 0, 0)),
                     source_file: temp_path.clone(),
-                    line_number: 2,
+                    line_number: Some(2),
                     original_line: "tokio==1.0.0".to_string(),
                     manifest_key: None,
                     section: None,
@@ -951,7 +978,7 @@ mod tests {
                     name: "serde".to_string(),
                     version_spec: VersionSpec::Pinned(Version::new(1, 0, 0)),
                     source_file: temp_path.clone(),
-                    line_number: 1,
+                    line_number: Some(1),
                     original_line: "serde==1.0.0".to_string(),
                     manifest_key: None,
                     section: None,
@@ -972,7 +999,7 @@ mod tests {
                     name: "tokio".to_string(),
                     version_spec: VersionSpec::Pinned(Version::new(1, 0, 0)),
                     source_file: temp_path.clone(),
-                    line_number: 2,
+                    line_number: Some(2),
                     original_line: "tokio==1.0.0".to_string(),
                     manifest_key: None,
                     section: None,

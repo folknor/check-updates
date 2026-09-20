@@ -1,5 +1,6 @@
 pub mod conda;
 pub mod lockfiles;
+pub mod pep508;
 pub mod pyproject;
 pub mod requirements;
 

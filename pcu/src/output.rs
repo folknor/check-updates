@@ -89,20 +89,23 @@ impl GlobalTableRenderer {
     }
 
     fn render_group_rows(&self, checks: &[&GlobalCheck]) {
-        // Calculate widths
+        // Widths are counted in `char`s to match the `{:<w$}` padding below,
+        // which goes through `Formatter::pad` and measures `chars().count()`.
+        // See `check_updates_core::output` for the full reasoning, including
+        // why display width (`unicode-width`) is deliberately not used.
         let max_name = checks
             .iter()
-            .map(|c| c.package.name.len())
+            .map(|c| c.package.name.chars().count())
             .max()
             .unwrap_or(0);
         let max_installed = checks
             .iter()
-            .map(|c| c.package.installed_version.to_string().len())
+            .map(|c| c.package.installed_version.to_string().chars().count())
             .max()
             .unwrap_or(0);
         let max_latest = checks
             .iter()
-            .map(|c| c.latest.to_string().len())
+            .map(|c| c.latest.to_string().chars().count())
             .max()
             .unwrap_or(0);
 
@@ -176,11 +179,16 @@ impl UvPythonTableRenderer {
             return;
         }
 
-        // Calculate column widths
-        let max_series = updates.iter().map(|c| c.series.len()).max().unwrap_or(0);
+        // Calculate column widths in `char`s, to match the `{:<w$}` padding
+        // below (`Formatter::pad` measures `chars().count()`).
+        let max_series = updates
+            .iter()
+            .map(|c| c.series.chars().count())
+            .max()
+            .unwrap_or(0);
         let max_installed = updates
             .iter()
-            .map(|c| c.installed_version.to_string().len())
+            .map(|c| c.installed_version.to_string().chars().count())
             .max()
             .unwrap_or(0);
 

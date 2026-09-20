@@ -56,9 +56,8 @@ impl PackageJsonParser {
 
                 if let Ok(version_spec) = Self::parse_npm_version(version_str) {
                     let line_number = Self::find_line_number(content, section, name);
-                    let original_line = content
-                        .lines()
-                        .nth(line_number.saturating_sub(1))
+                    let original_line = line_number
+                        .and_then(|n| content.lines().nth(n.saturating_sub(1)))
                         .unwrap_or("")
                         .to_string();
 
@@ -93,8 +92,9 @@ impl PackageJsonParser {
     /// occurrence, so a package listed in both `dependencies` and
     /// `peerDependencies` reported the same line twice. Scanning starts at the
     /// section header instead. This is still textual and still approximate -
-    /// it is display/diagnostic data, not what the updater edits.
-    fn find_line_number(content: &str, section: &str, package_name: &str) -> usize {
+    /// it is display/diagnostic data, not what the updater edits. `None` when
+    /// the key is not found inside the section; never a fabricated `1`.
+    fn find_line_number(content: &str, section: &str, package_name: &str) -> Option<usize> {
         let section_header = format!("\"{section}\"");
         let key = format!("\"{package_name}\"");
         let mut in_section = false;
@@ -107,7 +107,7 @@ impl PackageJsonParser {
                 continue;
             }
             if line.contains(&key) {
-                return i + 1;
+                return Some(i + 1);
             }
             // A closing brace at the start of the trimmed line ends the table.
             if line.trim_start().starts_with('}') {
@@ -115,7 +115,7 @@ impl PackageJsonParser {
             }
         }
 
-        1
+        None
     }
 }
 

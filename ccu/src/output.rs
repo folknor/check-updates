@@ -66,20 +66,24 @@ impl GlobalTableRenderer {
     }
 
     fn render_registry_rows(&self, checks: &[&&GlobalCheck]) {
+        // Widths are counted in `char`s to match the `{:<w$}` padding below,
+        // which goes through `Formatter::pad` and measures `chars().count()`.
+        // See `check_updates_core::output` for the full reasoning, including
+        // why display width (`unicode-width`) is deliberately not used.
         let max_name = checks
             .iter()
-            .map(|c| c.package.name.len())
+            .map(|c| c.package.name.chars().count())
             .max()
             .unwrap_or(0);
         let max_installed = checks
             .iter()
-            .map(|c| c.package.installed_version.to_string().len())
+            .map(|c| c.package.installed_version.to_string().chars().count())
             .max()
             .unwrap_or(0);
         let max_latest = checks
             .iter()
             .filter_map(|c| c.latest_version.as_ref())
-            .map(|v| v.to_string().len())
+            .map(|v| v.to_string().chars().count())
             .max()
             .unwrap_or(0);
 
@@ -150,9 +154,11 @@ impl GlobalTableRenderer {
     }
 
     fn render_commits_rows(&self, checks: &[&&GlobalCheck], show_hash: bool) {
+        // Counted in `char`s to match `{:<w$}` padding - see
+        // `render_registry_rows` above.
         let max_name = checks
             .iter()
-            .map(|c| c.package.name.len())
+            .map(|c| c.package.name.chars().count())
             .max()
             .unwrap_or(0);
 
@@ -203,7 +209,11 @@ impl GlobalTableRenderer {
                     .package
                     .git_hash
                     .as_deref()
-                    .map(|h| &h[..7.min(h.len())])
+                    // Truncate to 7 characters on a char boundary: slicing
+                    // `&h[..7]` would panic if byte 7 fell inside a codepoint.
+                    // Git hashes are hex, but the value is read out of
+                    // `.crates.toml`, which we do not control.
+                    .map(|h| h.char_indices().nth(7).map_or(h, |(i, _)| &h[..i]))
                     .unwrap_or("???????");
 
                 println!(

@@ -186,7 +186,7 @@ mod tests {
             name: name.to_string(),
             version_spec: VersionSpec::parse(spec_str).unwrap(),
             source_file: PathBuf::from("test.txt"),
-            line_number: 1,
+            line_number: Some(1),
             original_line: format!("{name}=={spec_str}"),
             manifest_key: None,
             section: None,

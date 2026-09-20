@@ -14,8 +14,18 @@ pub struct Dependency {
     pub version_spec: VersionSpec,
     /// Source file this dependency was found in
     pub source_file: PathBuf,
-    /// Line number in the source file (1-indexed)
-    pub line_number: usize,
+    /// Line number in the source file (1-indexed), when the parser could prove
+    /// where the declaration is written.
+    ///
+    /// `None` means "this dependency is real, but its location in the file is
+    /// unknown": a multi-line TOML string, an escaped literal, a value that
+    /// only exists after workspace inheritance, or a locator that simply did
+    /// not find the text it was looking for. Line-based updaters must treat
+    /// `None` as "do not rewrite" - a guessed line is a wrong-line rewrite
+    /// waiting to happen, and the wave-1 findings record several of those.
+    /// It is never a fabricated `1` or an out-of-range sentinel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_number: Option<usize>,
     /// Original line text (for updating)
     #[serde(skip_serializing)]
     pub original_line: String,
@@ -150,7 +160,7 @@ mod tests {
                 name: "dirs".to_string(),
                 version_spec: VersionSpec::Caret(Version::new(6, 0, 0)),
                 source_file: PathBuf::from("Cargo.toml"),
-                line_number: 1,
+                line_number: Some(1),
                 original_line: "dirs = \"6.0.0\"".to_string(),
                 manifest_key: None,
                 section: Some("dependencies".to_string()),

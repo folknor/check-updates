@@ -217,39 +217,6 @@ In project mode `-m` is "patch + minor" (a severity filter). In global mode
 restriction. And `if args.minor` is checked before force, so `pcu -g -mf`
 silently ignores `-f`.
 
-## RPT-015 - Table column widths are computed in bytes (three CLI renderers left)
-
-Reported by core. Narrowed: fixed in `core/src/output.rs` only.
-
-The filed mechanism was slightly wrong, and the correction matters for the
-remaining sites. `{:<w$}` does *not* count bytes: string padding goes through
-`Formatter::pad`, which measures in `chars().count()`. The defect is a unit
-mismatch - widths computed in bytes, padding applied in chars - so a multi-byte
-name over-pads its column by the number of UTF-8 continuation bytes. The fix is
-to compute widths with `chars().count()` so both sides use one metric.
-
-The same `.len()`-into-`{:<w$}` pattern is replicated verbatim in the three CLI
-renderers, which the entry as filed did not name:
-
-- `ccu/src/output.rs` - two width blocks (project table, global table)
-- `pcu/src/output.rs` - two blocks (package table, series table)
-- `ncu/src/output.rs` - one block
-
-Adding `unicode-width` was considered and argued down: `Formatter::pad` has no
-hook for a custom metric, so display-width correctness would mean hand-rolled
-padding in every row printer, and no string that reaches these renderers can be
-non-ASCII (crates.io, npm and PEP 508 names are all ASCII by grammar, as are
-semver and PEP 440 versions). The reasoning is recorded at the code site.
-
-## RPT-019 - `ccu/src/output.rs` shortens a git hash with an unguarded byte slice
-
-Lateral finding from the RPT-015 work.
-
-`&h[..7.min(h.len())]` guards the length but not char-boundary alignment: a
-non-ASCII `h` whose byte 7 falls mid-codepoint panics. Not reachable today,
-since git hashes are hex, but `str::get(..7)` or `chars().take(7)` removes the
-sharp edge for free.
-
 ## RPT-020 - Workspace manifest warnings on every check run
 
 Lateral finding, reported independently by four hunters in this wave.
@@ -282,9 +249,10 @@ documented form (`@scope%2Fname`) and will break against stricter mirrors.
 
 Reported by ncu, pcu-runtime, core.
 
-- `ncu/src/output.rs::GlobalTableRenderer::render` has dead `first_group`
-  bookkeeping plus a `let _ = first_group;` to silence the warning - scaffolding
-  for a second source that does not exist.
+- The ncu `first_group` scaffolding is removed. Judgement recorded at the site
+  for when a second global source arrives: multi-source globals (pnpm/yarn)
+  are a *discovery* feature first, the grouping is the trivial half, and ccu's
+  `GlobalTableRenderer::render` is the working three-source model to copy.
 - `pcu`'s `GlobalPackageDiscovery::_include_prerelease` is stored and never
   read. `pcu -g -p` only affects the PyPI client.
 - `pypi.rs`'s `yanked` field carries `#[allow(dead_code)]` while being read, so
@@ -293,6 +261,41 @@ Reported by ncu, pcu-runtime, core.
   yanked - defensible.)
 - `core::VersionSpec::max_major()` was unused and inconsistent; it has since
   been deleted, with the reasoning recorded at the site.
+
+## RPT-023 - `core::output::render_deduped` does not dedup
+
+Found while wiring ncu's per-declaration reporting.
+
+The function only renders. Each CLI hand-rolls its own dedup before calling it -
+ccu and pcu did, ncu did not, which is why making ncu report per declaration
+would have printed one identical row per workspace member until a display-level
+dedup on `(name, target)` was added at that call site.
+
+Either the name should change, or the deduping should move inside it so the
+three callers stop reimplementing it differently. The current state invites the
+next caller to make exactly the same mistake.
+
+## RPT-022 - Every update-table row can end in trailing whitespace
+
+Lateral finding from the table-width work, present in all four renderers
+(`core/src/output.rs` and the three CLI ones).
+
+The row format ends `... -> {:<to_w$}  {}` with severity as the last field, and
+severity is `String::new()` when `update_severity()` returns `None`. The
+latest-version column is padded to width and then followed by two literal
+spaces, so such a row ends in pure trailing blanks. Cosmetic, but it annoys
+anyone diffing or copy-pasting output.
+
+Two smaller shape issues found alongside it:
+
+- ccu's `max_latest` is computed with `filter_map(latest_version)` while the row
+  printer falls back to `String::new()`, so a registry row with
+  `has_update == true` and `latest_version == None` prints an empty but fully
+  padded column. Unreachable today, but nothing in the types enforces that
+  `has_update` implies `Some`.
+- ccu's git-hash column is unpadded, correct only because hash and placeholder
+  are both 7 chars by construction. A shorter hash makes the status column
+  after it ragged.
 
 ## RPT-021 - `GitStatus::commits_behind` is populated from `ahead_by`
 

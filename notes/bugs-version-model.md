@@ -42,6 +42,33 @@ Still true, by a different mechanism than filed: `split_release` now stops at
 `1` and the suffix `"!2.0.0"` is rejected as not a recognised pre-release, so
 the parse still errors and the release is still dropped silently.
 
+## VER-017 - A `Wildcard` spec has no base version, so it can never be updated
+
+Found while reviewing the conda MatchSpec work, and it is the real mechanism
+behind a class of "silently never updates" reports that have been blamed on the
+updaters' string matching.
+
+`Wildcard::base_version()` returns `None`. In `DependencyResolver::resolve`,
+`current` is `installed.or_else(|| version_spec.base_version())`, so a wildcard
+dependency in a project with no lock file entry has no `current` at all. It then
+gets `target = latest` with no spec and no severity, and `will_update` is false
+in every mode. No message is printed.
+
+This bites conda hardest (`python=3.9.*`, and pcu has no conda source of
+installed versions whatsoever, so *every* conda dependency is compared from its
+spec base version), but it applies equally to a pip `==1.24.*` in a lock-less
+project.
+
+Two related defects in the same area:
+
+- `VersionSpec::with_version` for `Wildcard` caps the new prefix at two
+  segments, so `==1.24.0.*` bumped to 1.26 becomes `==1.26.*` - silently
+  widening the user's declared precision. Reachable from a requirements.txt
+  `==1.24.0.*`.
+- `replace_in_conda` has no `==X.*` <-> `=X` mapping, so even once the above is
+  fixed, a conda wildcard still will not rewrite. Dead code to add today, but it
+  is the third piece of the same fix.
+
 ## VER-007 - Cargo's single-`=` exact pin degrades to an unrewritable `Complex`
 
 Reported by core and ccu.

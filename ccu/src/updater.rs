@@ -268,7 +268,7 @@ mod tests {
                 name: name.to_string(),
                 version_spec: VersionSpec::parse(spec_str).unwrap(),
                 source_file: path,
-                line_number: 2,
+                line_number: Some(2),
                 original_line: format!("{name} = \"{spec_str}\""),
                 manifest_key: None,
                 section: None,

@@ -142,8 +142,7 @@ async fn run_global_mode(args: &Args) -> Result<()> {
         check_path_updates(&packages),
         cratesio_client.get_packages(&registry_names, move |current, _total| {
             registry_done_reg.store(current, Ordering::Relaxed);
-            let total =
-                current + git_done_reg.load(Ordering::Relaxed);
+            let total = current + git_done_reg.load(Ordering::Relaxed);
             let pb = pb_for_registry.lock().expect("lock poisoned");
             pb.set_position(total as u64);
         }),
@@ -286,8 +285,12 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     let lockfile_parser = CargoLockParser::new();
 
     // Load workspace dependency versions from root so member crates'
-    // `.workspace = true` references can be resolved
-    let root_cargo_toml = project_path.join("Cargo.toml");
+    // `.workspace = true` references can be resolved. Cargo resolves those from the
+    // workspace root, not from the directory we were pointed at, so running against a
+    // member crate must still read the root manifest - otherwise every
+    // `.workspace = true` dependency silently drops out.
+    let workspace_root = detector.workspace_root();
+    let root_cargo_toml = workspace_root.join("Cargo.toml");
     if root_cargo_toml.exists() {
         cargo_toml_parser.load_workspace_deps(&root_cargo_toml)?;
     }
@@ -310,16 +313,20 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         return Ok(());
     }
 
-    // Get installed versions from Cargo.lock
-    let installed_versions = lockfile_parser.find_and_parse(&project_path)?;
+    // Get installed versions from Cargo.lock. A workspace keeps a single lockfile at its
+    // root, so look there rather than beside the member manifest.
+    let installed_versions = lockfile_parser.find_and_parse(&workspace_root)?;
 
     // 3. Query crates.io for latest versions
-    let package_names: Vec<String> = all_dependencies
+    // Sorted, because `HashSet` iteration order is not stable between runs and it drives
+    // the order of the `errors` array in `--json` output.
+    let mut package_names: Vec<String> = all_dependencies
         .iter()
         .map(|d| d.name.clone())
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
+    package_names.sort();
 
     let cratesio_client = CratesIoClient::new(args.pre_release);
 
