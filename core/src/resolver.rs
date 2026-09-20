@@ -116,7 +116,29 @@ impl DependencyResolver {
         }
     }
 
-    /// Calculate the severity of an update
+    /// Classify the move from `current` to `target`.
+    ///
+    /// `None` means "this is not an update", and nothing else. It used to also
+    /// mean "this is an update we have no field to name it by": the three
+    /// fields were compared independently, so `1.2.0-rc1` -> `1.2.0` had major,
+    /// minor and patch all equal and fell through to `None`. That row had a
+    /// real target, printed a blank severity column, and `will_update` refused
+    /// to write it in every non-force mode - a real available update, displayed
+    /// blank. The same hole swallowed `1.2.0` -> `1.2.0.post1`, `1.2.3` ->
+    /// `1.2.3.4` and every local-segment move.
+    ///
+    /// So the ordering decides whether there is an update at all - one
+    /// comparison, using the same `Ord` the rest of the pipeline uses - and the
+    /// fields only choose the *name*. Anything that is newer without changing
+    /// the triple (leaving a pre-release, gaining a post-release, a fourth
+    /// release segment, a local segment) is a `Patch`: it is the smallest class
+    /// we have, and classing it lower than it deserves would hide it, while
+    /// classing it higher would only mean `-u` declines to write a de-risking
+    /// move.
+    ///
+    /// An epoch bump is a `Major`. PEP 440 epochs exist precisely to restart a
+    /// version series, so `1.0` -> `1!0.1` is the most disruptive move there is
+    /// even though the release tuple went down.
     pub fn calculate_severity(
         current: Option<&Version>,
         target: Option<&Version>,
@@ -124,14 +146,16 @@ impl DependencyResolver {
         let current = current?;
         let target = target?;
 
-        if target.major > current.major {
+        if target <= current {
+            return None;
+        }
+
+        if target.epoch != current.epoch || target.major > current.major {
             Some(UpdateSeverity::Major)
         } else if target.minor > current.minor {
             Some(UpdateSeverity::Minor)
-        } else if target.patch > current.patch {
-            Some(UpdateSeverity::Patch)
         } else {
-            None
+            Some(UpdateSeverity::Patch)
         }
     }
 
@@ -322,6 +346,63 @@ mod tests {
         let result = resolver.resolve(&dep, &pkg_info, Some(&installed));
 
         assert_eq!(result.in_range.as_ref().unwrap().to_string(), "2.4.2");
+    }
+
+    // A move that leaves the triple untouched is still an update. Comparing
+    // major, minor and patch independently classified it `None`, which printed
+    // a blank severity column and stopped `-u` from ever writing it.
+    #[test]
+    fn updates_that_do_not_change_the_triple_are_still_classified() {
+        let sev = |from: &str, to: &str| {
+            DependencyResolver::calculate_severity(
+                Some(&Version::from_str(from).unwrap()),
+                Some(&Version::from_str(to).unwrap()),
+            )
+        };
+
+        assert_eq!(sev("1.2.0-rc1", "1.2.0"), Some(UpdateSeverity::Patch));
+        assert_eq!(sev("1.2.0", "1.2.0.post1"), Some(UpdateSeverity::Patch));
+        assert_eq!(sev("1.2.3", "1.2.3.4"), Some(UpdateSeverity::Patch));
+        assert_eq!(sev("1.0.0+cpu", "1.0.0+cu118"), Some(UpdateSeverity::Patch));
+
+        assert_eq!(sev("1.2.3", "1.3.0"), Some(UpdateSeverity::Minor));
+        assert_eq!(sev("1.2.3", "2.0.0"), Some(UpdateSeverity::Major));
+        // An epoch reset is the most disruptive move there is, even though the
+        // release tuple went down.
+        assert_eq!(sev("2024.1", "1!0.1"), Some(UpdateSeverity::Major));
+    }
+
+    // `None` means "not an update" and nothing else. A target that is not newer
+    // must not be classified by whichever field happens to be larger.
+    #[test]
+    fn a_target_that_is_not_newer_has_no_severity() {
+        let sev = |from: &str, to: &str| {
+            DependencyResolver::calculate_severity(
+                Some(&Version::from_str(from).unwrap()),
+                Some(&Version::from_str(to).unwrap()),
+            )
+        };
+
+        assert_eq!(sev("1.2.3", "1.2.3"), None);
+        assert_eq!(sev("1.2.3", "1.1.5"), None);
+        assert_eq!(sev("1.2.0", "1.2.0-rc1"), None);
+        assert_eq!(sev("1.4.0.post1", "1.4.0"), None);
+    }
+
+    // The whole point, end to end: a prerelease installed against a released
+    // target produces a row that is written, not a blank column.
+    #[test]
+    fn prerelease_to_release_is_a_writable_update() {
+        let resolver = DependencyResolver::new();
+        let dep = create_test_dependency("flask", ">=1.2.0-rc1");
+        let pkg_info = create_package_info("flask", &["1.2.0-rc1", "1.2.0"]);
+
+        let installed = Version::from_str("1.2.0-rc1").unwrap();
+        let result = resolver.resolve(&dep, &pkg_info, Some(&installed));
+
+        assert_eq!(result.target.as_ref().unwrap().to_string(), "1.2.0");
+        assert_eq!(result.severity, Some(UpdateSeverity::Patch));
+        assert!(result.will_update(false, false));
     }
 
     #[test]

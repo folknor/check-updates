@@ -358,13 +358,22 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         })
         .collect();
 
-    // Updates that exist but fall outside the requested severity filter
+    // Updates that exist but fall outside the requested severity filter. A row
+    // `-uf` could not write either is counted separately: telling the user to
+    // "run -uf" for it would be false, and in update mode this count is the
+    // only place such a row surfaces at all.
     let skipped: HashSet<&str> = checks
         .iter()
-        .filter(|c| c.has_update() && !c.will_update(args.minor, args.force))
+        .filter(|c| c.is_actionable() && c.has_update() && !c.will_update(args.minor, args.force))
         .map(|c| c.dependency.name.as_str())
         .collect();
     let skipped = skipped.len();
+    let blocked: HashSet<&str> = checks
+        .iter()
+        .filter(|c| !c.is_actionable())
+        .map(|c| c.dependency.name.as_str())
+        .collect();
+    let blocked = blocked.len();
 
     // Render output
     let renderer = TableRenderer::new(true);
@@ -388,6 +397,11 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         if skipped > 0 && !args.force {
             println!(
                 "{skipped} update(s) outside the selected severity were skipped. Run -uf to force upgrade all."
+            );
+        }
+        if blocked > 0 {
+            println!(
+                "{blocked} update(s) cannot be written by -u even with --force; run without -u to see them and why."
             );
         }
     } else if !to_render.is_empty() {

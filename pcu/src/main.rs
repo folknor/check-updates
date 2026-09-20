@@ -1,5 +1,5 @@
 use anyhow::Result;
-use check_updates_core::{DependencyCheck, DependencyResolver, UpdateSeverity};
+use check_updates_core::{Dependency, DependencyCheck, DependencyResolver, UpdateSeverity};
 use clap::Parser;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -20,12 +20,80 @@ use std::sync::{Arc, Mutex};
 const SCHEMA_VERSION: u32 = 1;
 const TOOL_NAME: &str = "pcu";
 
+/// `kind` tag for a dependency that was found and parsed but deliberately not
+/// resolved, because the registry that owns it is not one pcu can query. Today
+/// that is exactly the conda-channel half of `environment.yml`.
+const UNCHECKED_KIND: &str = "registry_unsupported";
+
+/// True when a dependency came from the conda-channel half of an
+/// `environment.yml` rather than from PyPI.
+///
+/// The entries under `dependencies:` are resolved by conda against
+/// conda-forge/defaults; the nested `pip:` list genuinely is PyPI and must keep
+/// resolving as it always has. Checking the *file* as well as the section keeps
+/// this from catching a `requirements.txt` or PEP 621 dependency that happens to
+/// carry the section name `dependencies`.
+///
+/// Sending conda names to PyPI is not merely noisy. `python`, `mkl`,
+/// `libgcc-ng` and `cudatoolkit` come back as fetch errors, and `pytorch` comes
+/// back as an abandoned 0.1.2 stub that has nothing to do with the conda package
+/// of the same name - so the user is offered an "update" computed from an
+/// unrelated project's version history. `reference/resolution-principles.md` is
+/// explicit that inventing information is worse than silence.
+fn is_conda_channel_dependency(dep: &Dependency) -> bool {
+    let from_environment_file = dep
+        .source_file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "environment.yml" || n == "environment.yaml");
+
+    from_environment_file && dep.section.as_deref() != Some("dependencies.pip")
+}
+
+/// The honest reason shown for a conda dependency, on both output paths.
+fn unchecked_conda_message(dep: &Dependency) -> String {
+    format!(
+        "{}: conda-channel dependency, not checked (pcu queries PyPI only)",
+        dep.name
+    )
+}
+
+/// Report parsed dependencies that were deliberately not resolved.
+///
+/// Principle 3: a row that cannot be checked is still shown, with a reason.
+/// Dropping these silently would leave the user believing an `environment.yml`
+/// had been checked end to end.
+fn print_unchecked(unchecked: &[&Dependency]) {
+    if unchecked.is_empty() {
+        return;
+    }
+    println!(
+        "{}",
+        format!(
+            "Not checked ({}) - conda channel packages, which pcu cannot resolve:",
+            unchecked.len()
+        )
+        .dimmed()
+    );
+    for dep in unchecked {
+        println!(
+            "  {}",
+            format!("{} {}", dep.name, dep.version_spec).dimmed()
+        );
+    }
+    println!();
+}
+
 /// The JSON `errors` array: one object per failed PyPI lookup, carrying the
 /// stable `kind` tag from `FetchErrorKind::as_str` so a consumer can tell
 /// `not_found` from `rate_limited` without parsing `message`, followed by one
 /// `{"message"}` object per discovery tool that was present but did not
 /// answer. A present-but-broken tool must never read as a clean machine.
-fn errors_to_json(failures: &[FetchError], tool_errors: &[String]) -> Vec<serde_json::Value> {
+fn errors_to_json(
+    failures: &[FetchError],
+    unchecked: &[&Dependency],
+    tool_errors: &[String],
+) -> Vec<serde_json::Value> {
     failures
         .iter()
         .map(|f| {
@@ -35,6 +103,14 @@ fn errors_to_json(failures: &[FetchError], tool_errors: &[String]) -> Vec<serde_
                 "message": f.detail,
             })
         })
+        .chain(unchecked.iter().map(|d| {
+            serde_json::json!({
+                "package": d.name,
+                "kind": UNCHECKED_KIND,
+                "message": unchecked_conda_message(d),
+                "file": d.source_file,
+            })
+        }))
         .chain(
             tool_errors
                 .iter()
@@ -69,13 +145,17 @@ fn print_fetch_failures(failures: &[FetchError]) {
     }
 }
 
-fn emit_json_project(checks: &[DependencyCheck], failures: &[FetchError]) -> Result<()> {
+fn emit_json_project(
+    checks: &[DependencyCheck],
+    failures: &[FetchError],
+    unchecked: &[&Dependency],
+) -> Result<()> {
     let report = serde_json::json!({
         "schema_version": SCHEMA_VERSION,
         "tool": TOOL_NAME,
         "mode": "project",
         "checks": checks,
-        "errors": errors_to_json(failures, &[]),
+        "errors": errors_to_json(failures, unchecked, &[]),
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -93,7 +173,7 @@ fn emit_json_global(
         "mode": "global",
         "checks": checks,
         "python_versions": python_versions,
-        "errors": errors_to_json(failures, tool_errors),
+        "errors": errors_to_json(failures, &[], tool_errors),
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -418,7 +498,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     if detected_files.is_empty() {
         if args.json {
-            emit_json_project(&[], &[])?;
+            emit_json_project(&[], &[], &[])?;
         } else {
             println!("No dependency files found in {project_path:?}");
         }
@@ -447,11 +527,26 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         all_dependencies.extend(deps);
     }
 
+    // Split off the conda-channel dependencies before anything is sent to PyPI.
+    // They stay visible - `print_unchecked` and the JSON `errors` array both
+    // name them - but they are never resolved against a registry that does not
+    // own them. See `is_conda_channel_dependency`.
+    let (conda_dependencies, all_dependencies): (Vec<Dependency>, Vec<Dependency>) =
+        all_dependencies
+            .into_iter()
+            .partition(is_conda_channel_dependency);
+    let unchecked: Vec<&Dependency> = conda_dependencies.iter().collect();
+
     if all_dependencies.is_empty() {
         if args.json {
-            emit_json_project(&[], &[])?;
+            emit_json_project(&[], &[], &unchecked)?;
         } else {
-            println!("No dependencies found in any files");
+            print_unchecked(&unchecked);
+            if unchecked.is_empty() {
+                println!("No dependencies found in any files");
+            } else {
+                println!("No PyPI dependencies found in any files");
+            }
         }
         return Ok(());
     }
@@ -506,6 +601,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     // Print fetch failures if any (suppressed in JSON mode; included in payload)
     if !args.json {
         print_fetch_failures(&fetch_failures);
+        print_unchecked(&unchecked);
     }
 
     // 4. Resolve updates
@@ -551,17 +647,26 @@ async fn run_project_mode(args: &Args) -> Result<()> {
             let updater = FileUpdater::new();
             let _ = updater.apply_updates(&checks, args.minor, args.force)?;
         }
-        emit_json_project(&checks, &fetch_failures)?;
+        emit_json_project(&checks, &fetch_failures, &unchecked)?;
         return Ok(());
     }
 
-    // Updates that exist but fall outside the requested severity filter
+    // Updates that exist but fall outside the requested severity filter. A row
+    // `-uf` could not write either is counted separately: telling the user to
+    // "run -uf" for it would be false, and in update mode this count is the
+    // only place such a row surfaces at all.
     let skipped: HashSet<&str> = checks
         .iter()
-        .filter(|c| c.has_update() && !c.will_update(args.minor, args.force))
+        .filter(|c| c.is_actionable() && c.has_update() && !c.will_update(args.minor, args.force))
         .map(|c| c.dependency.name.as_str())
         .collect();
     let skipped = skipped.len();
+    let blocked: HashSet<&str> = checks
+        .iter()
+        .filter(|c| !c.is_actionable())
+        .map(|c| c.dependency.name.as_str())
+        .collect();
+    let blocked = blocked.len();
 
     let renderer = TableRenderer::new(true);
     if args.update && deduplicated.is_empty() {
@@ -596,6 +701,13 @@ async fn run_project_mode(args: &Args) -> Result<()> {
                 "-uf".cyan()
             );
         }
+        if blocked > 0 {
+            println!(
+                "{blocked} update(s) cannot be written by {} even with --force; run without {} to see them and why.",
+                "-u".cyan(),
+                "-u".cyan()
+            );
+        }
     } else if !deduplicated.is_empty() {
         println!();
         println!(
@@ -607,4 +719,69 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use check_updates_core::VersionSpec;
+    use std::path::PathBuf;
+
+    fn dep(name: &str, file: &str, section: Option<&str>) -> Dependency {
+        Dependency {
+            name: name.to_string(),
+            version_spec: VersionSpec::Any,
+            source_file: PathBuf::from(file),
+            line_number: None,
+            original_line: String::new(),
+            manifest_key: None,
+            section: section.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn conda_channel_dependencies_are_not_sent_to_pypi() {
+        assert!(is_conda_channel_dependency(&dep(
+            "pytorch",
+            "/p/environment.yml",
+            Some("dependencies")
+        )));
+        assert!(is_conda_channel_dependency(&dep(
+            "python",
+            "/p/environment.yaml",
+            Some("dependencies")
+        )));
+    }
+
+    #[test]
+    fn pip_section_of_environment_yml_stays_on_pypi() {
+        assert!(!is_conda_channel_dependency(&dep(
+            "requests",
+            "/p/environment.yml",
+            Some("dependencies.pip")
+        )));
+    }
+
+    #[test]
+    fn other_files_are_untouched_even_with_a_dependencies_section() {
+        assert!(!is_conda_channel_dependency(&dep(
+            "requests",
+            "/p/requirements.txt",
+            None
+        )));
+        assert!(!is_conda_channel_dependency(&dep(
+            "requests",
+            "/p/pyproject.toml",
+            Some("dependencies")
+        )));
+    }
+
+    #[test]
+    fn unchecked_conda_dependencies_appear_in_the_json_errors_array() {
+        let conda = dep("pytorch", "/p/environment.yml", Some("dependencies"));
+        let errors = errors_to_json(&[], &[&conda], &[]);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0]["package"], "pytorch");
+        assert_eq!(errors[0]["kind"], UNCHECKED_KIND);
+    }
 }

@@ -12,35 +12,26 @@
 Findings about `core/src/version.rs`, `core/src/resolver.rs` and the shared
 `Version` / `VersionSpec` model. Every CLI inherits these.
 
-## VER-003 - PEP 440 post-releases are classified as pre-releases
+## VER-019 - two PEP 440 residuals from the version-model restructure
 
-Reported by core, pcu-parsers, pcu-runtime.
+Both verified during review, both judged not worth an ecosystem discriminant
+today, both recorded so they are not rediscovered as fresh defects.
 
-`"1.0.0.post1"` matches the `post` pattern, so `pre_release = Some(".post1")`
-and `is_prerelease()` is true. `Ord` then ranks `1.0.0.post1 < 1.0.0`. Post
-releases are strictly *newer* than the base release under PEP 440.
+- `1.0-1` is an implicit post-release under PEP 440 (`1.0.post1`) but parses
+  through the semver branch as the pre-release `"1"`. PyPI normalises versions
+  in its JSON responses, so this only reaches us from a hand-written pin.
+- `==1.0.0` no longer satisfies `1.0.0+cu118`. PEP 440 says a specifier with no
+  local segment matches any local version. Worth revisiting if `in_range` for a
+  pinned torch-style dependency looks wrong.
 
-- `pcu/src/pypi.rs` filters every `.postN` release out of `filtered_versions`
-  and out of `latest_stable`, so a package whose newest stable release is a post
-  release is reported one release behind, and pcu can never recommend one.
-- In pcu global mode an installed `1.4.0.post1` compares `<` `1.4.0`, so
-  `has_update` is true: pcu prints `1.4.0.post1 -> 1.4.0` and generates an
-  upgrade command for a **downgrade**.
-
-## VER-004 - PEP 440 epoch versions fail to parse and are dropped silently
-
-Reported by pcu-runtime, pcu-parsers.
-
-`Version::from_str("1!2.0.0")` splits on `.` and tries to parse `"1!2"` as the
-major - it fails, so the whole parse errors. In `pypi.rs::get_package` that
-release is skipped by `if let Ok(version)` with no diagnostic. A package that
-has performed an epoch reset has its newest releases invisible, and pcu
-confidently reports an older version as latest. `Ord` also has no epoch field,
-so even once parsed they would order wrong.
-
-Still true, by a different mechanism than filed: `split_release` now stops at
-`1` and the suffix `"!2.0.0"` is rejected as not a recognised pre-release, so
-the parse still errors and the release is still dropped silently.
+Context for whoever picks these up: `local` now participates in ordering for all
+three ecosystems, which is a deliberate deviation from semver precedence. It is
+unobservable on crates.io and npm - both registries reject a publish that
+differs from an existing release only in build metadata - and it is required for
+PyPI, where `2.1.0+cu118` and `2.1.0+cpu` are distinct releases. Ordering a
+local segment can only make a version visible that equality would have
+collapsed, never hide one, so principle 1 settles it without needing to know
+which tool is asking.
 
 ## VER-017 - conda wildcards now resolve correctly and still cannot be written
 
@@ -111,42 +102,56 @@ anything starting with `=` into it; no operator branch matches,
 
 No diagnostic at any point.
 
-## VER-008 - `Complex` is a silent dead end for every spec the parser cannot model
+## VER-008 - the blocked-row signal exists but the update tables filter it out
 
 Reported by core, ccu, pcu-parsers (and as the mechanism behind VER-007 and
-DSC-007).
+DSC-007). The hunters' split is now settled by evidence rather than argument:
+`Complex` stays the safe landing place (a rewrite would have to discard the part
+that was not understood), and the defect was only ever the silence.
 
-Anything unparseable becomes `Complex`, which claims "out of range" from
-`satisfies()` and "not rewritable" from `is_rewritable()`, quietly disabling
-half the pipeline with no user-visible signal. The hunters split on the remedy:
-core and ccu argue an unparseable spec should be a hard error surfaced to the
-user; ncu argues the opposite direction for its ecosystem - that `Complex`
-(non-rewritable) is the *safe* landing place and the bug is that npm specs get
-lossily approximated into rewritable variants instead (DSC-007). Both agree the
-current silence is the defect.
+The signal landed. `core::UpdateBlocker` distinguishes `UnmodellableSpec`,
+`UnconstrainedSpec` and `NoWritableTarget`; `DependencyCheck::update_blocker()`
+is defined as "has an update but is not writable under the most permissive
+flags", so a major withheld by plain `-u` is *not* flagged and stays in the
+existing "run `-uf`" count. The table carries a yellow marker inside the
+severity column and prints one legend line per distinct reason with a row count.
+`--json` gains `updatable` and `blocked_reason`.
 
-## VER-010 - `calculate_severity` compares fields independently
+Residue, and it defeats the whole thing until fixed - in all three `main.rs`:
 
-Reported by core, ccu (as the downstream of VER-001), ncu.
+- The `--update` display list filters on `!will_update(args.minor, args.force)`,
+  which drops blocked rows from the table **entirely**. That is the rule-3
+  violation the marker was built to fix, one layer above where the marker can
+  reach. The filter needs `|| c.update_blocker().is_some()`.
+- The `skipped` count conflates "excluded by your filter" with "cannot be
+  written at all" and tells the user to `Run -uf to force upgrade all`, which is
+  false for a blocked row.
+- `UpdateBlocker` is only reachable as `check_updates_core::types::UpdateBlocker`
+  and should join the `pub use types::{...}` line in `core/src/lib.rs`.
 
-```rust
-if target.major > current.major { Major }
-else if target.minor > current.minor { Minor }
-else if target.patch > current.patch { Patch }
-else { None }
-```
+## VER-010 - the independent-field severity comparison survives in four more places
 
-- Prerelease to release (`1.2.0-rc1` -> `1.2.0`) has all three fields equal, so
-  `target` is `Some` but `severity` is `None`. `will_update` then returns false
-  for every non-force mode, `format_severity` prints an empty column, and a
-  dependency with a real available update is displayed blank and never written
-  by `-u`.
-- A target whose minor is lower but patch higher (`1.2.3` -> `1.1.5`) classifies
-  as `Patch`. Unreachable today because `calculate_target` only returns targets
-  greater than current, but the function is `pub` and named as a general
-  classifier.
+Reported by core, ccu, ncu. Fixed in `core/src/resolver.rs`: ordering now decides
+whether there is an update at all and the fields only choose the name, so `None`
+means "not an update" and nothing else.
 
-Should be one lexicographic comparison of the triple plus a prerelease rule.
+The same hand-rolled comparison was copied into global mode in all three tools
+and into pcu's Python reporting, none of which call the fixed function:
+
+- `ccu/src/global.rs::update_severity`
+- `pcu/src/global.rs::update_severity`
+- `ncu/src/global.rs::update_severity`
+- `pcu/src/uv_python.rs::is_patch_update`
+
+All four still return `None` for a move that does not change the triple - a
+prerelease-to-release, a gained post-release, a fourth release segment, a local
+segment - and all four still misclassify a lower-minor/higher-patch target. They
+should call `DependencyResolver::calculate_severity`, which now holds the one
+correct definition.
+
+This is where the pcu global-mode *downgrade* symptom actually lived. The
+`1.4.0.post1 -> 1.4.0` command is already gone, because `has_update` there is
+computed from the corrected `Ord`, but the severity half is untouched.
 
 ## VER-013 - `VersionSpec::parse` only models a two-clause range
 
@@ -156,15 +161,6 @@ Only `>=X,<Y` is recognised. `>1.0,<2.0`, three-clause specs, and PEP 440
 multi-clause specifier sets all become `Complex`, whose `satisfies` returns
 `false` - i.e. the tool claims the installed version is out of range. See
 VER-008.
-
-## VER-015 - `PartialEq` / `Ord` ignore the local version segment
-
-Reported by pcu-parsers.
-
-`1.0.0+cu118` and `1.0.0+cpu` compare equal. (Semver excludes build metadata
-from precedence by design, so this is correct for ccu/ncu and wrong for PEP 440
-local versions, which are ordered - another instance of one struct serving three
-incompatible orderings.)
 
 ## Structural recommendation, as filed by the hunters
 

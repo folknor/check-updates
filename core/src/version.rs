@@ -12,13 +12,44 @@ pub enum VersionError {
     InvalidSpecifier(String),
 }
 
-/// A parsed semantic version
+/// A parsed version.
+///
+/// The model is PEP 440's, because PEP 440 is the superset: an epoch, a release
+/// tuple of arbitrary length, a pre-release, a post-release, a dev-release and a
+/// local segment. Every semver version is expressible in it - a semver
+/// pre-release is a PEP 440 pre-release, and semver build metadata lands in
+/// `local` - so one type still serves all three ecosystems, and the fields that
+/// only Python uses simply stay `None` for Cargo and npm input.
+///
+/// One deliberate deviation remains, recorded here because it is the last place
+/// the three orderings genuinely disagree: `local` participates in comparison.
+/// PEP 440 orders local versions (`1.0+cu118` and `1.0+cpu` are different
+/// releases and must not compare equal), while semver excludes build metadata
+/// from precedence. Ordering it is the informing choice under
+/// `reference/resolution-principles.md` rule 1 - it can only ever make a
+/// version *visible* that equality would have collapsed, never hide one - so it
+/// is applied uniformly rather than gated on an ecosystem discriminant that
+/// `core` has no way to obtain today.
 #[derive(Debug, Clone)]
 pub struct Version {
+    /// PEP 440 epoch (`1!2.0.0`). Zero for everything that does not spell one.
+    pub epoch: u64,
     pub major: u64,
     pub minor: u64,
     pub patch: u64,
+    /// The full release tuple as written, which may be shorter or longer than
+    /// three segments. `major`/`minor`/`patch` are the first three, zero-filled;
+    /// comparison uses this, so `1.2.3.4` and `1.2.3.5` are no longer equal.
+    pub release: Vec<u64>,
+    /// Pre-release identifiers (`rc1`, `alpha.1`, semver's post-`-` body).
     pub pre_release: Option<String>,
+    /// PEP 440 post-release number (`1.0.post1`). A post-release is strictly
+    /// *newer* than its base release, which is why it cannot live in
+    /// `pre_release`.
+    pub post: Option<u64>,
+    /// PEP 440 dev-release number (`1.0.dev1`), which sorts below everything
+    /// else at the same release/pre/post position.
+    pub dev: Option<u64>,
     /// Local version segment (Python) or build metadata (Cargo)
     pub local: Option<String>,
     /// Original string representation
@@ -52,18 +83,35 @@ impl Eq for Version {}
 impl Version {
     pub fn new(major: u64, minor: u64, patch: u64) -> Self {
         Self {
+            epoch: 0,
             major,
             minor,
             patch,
+            release: vec![major, minor, patch],
             pre_release: None,
+            post: None,
+            dev: None,
             local: None,
             original: format!("{major}.{minor}.{patch}"),
         }
     }
 
-    /// Check if this is a pre-release version
+    /// Check if this is a pre-release version.
+    ///
+    /// A dev-release counts; a *post*-release does not. `1.0.0.post1` is a
+    /// released version that happens to sort above `1.0.0`, and every caller of
+    /// this function uses it to decide whether a release is fit to recommend -
+    /// `ccu/src/cratesio.rs`, `pcu/src/pypi.rs` and `ncu/src/npm.rs` all filter
+    /// their version lists and their `latest_stable` on it. Answering "yes" for
+    /// a post-release is what made pcu report a package one release behind, and
+    /// made its global mode emit an upgrade command that was a downgrade.
     pub fn is_prerelease(&self) -> bool {
-        self.pre_release.is_some()
+        self.pre_release.is_some() || self.dev.is_some()
+    }
+
+    /// Check if this is a PEP 440 post-release.
+    pub fn is_postrelease(&self) -> bool {
+        self.post.is_some()
     }
 
     /// Check if this version is in the same major series as another
@@ -90,43 +138,69 @@ impl FromStr for Version {
             (s, None)
         };
 
+        // Strip the PEP 440 epoch (`1!2.0.0`). Before this existed the `!`
+        // landed in the release core, the parse failed, and every release
+        // published after an epoch reset was dropped - so the tool named an
+        // older version as latest with total confidence.
+        let (epoch, version_part) =
+            split_epoch(version_part).ok_or_else(|| VersionError::InvalidVersion(s.to_string()))?;
+
         // Split the numeric release core from whatever follows it. The release
         // core is the longest leading `\d+(\.\d+)*`; the remainder must be a
-        // recognizable pre-release suffix or the whole string is rejected.
+        // recognizable pre/post/dev suffix or the whole string is rejected.
         let (base_part, suffix) = split_release(version_part);
         if base_part.is_empty() {
             return Err(VersionError::InvalidVersion(s.to_string()));
         }
-        let pre_release =
-            parse_prerelease(suffix).ok_or_else(|| VersionError::InvalidVersion(s.to_string()))?;
+        let parsed_suffix =
+            parse_suffix(suffix).ok_or_else(|| VersionError::InvalidVersion(s.to_string()))?;
 
-        // Parse the base version (major.minor.patch). Every segment here is a
-        // digit run by construction, so a parse failure means numeric overflow
-        // and is an error - never a silent `0`.
-        let mut parts = base_part.split('.');
+        // Parse the release tuple. Every segment here is a digit run by
+        // construction, so a parse failure means numeric overflow and is an
+        // error - never a silent `0`. The tuple is kept whole: truncating at
+        // three made `1.2.3.4` compare equal to `1.2.3.5`.
+        let mut release = Vec::new();
+        for seg in base_part.split('.') {
+            release.push(
+                seg.parse::<u64>()
+                    .map_err(|_| VersionError::InvalidVersion(s.to_string()))?,
+            );
+        }
+        if release.is_empty() {
+            return Err(VersionError::InvalidVersion(s.to_string()));
+        }
 
-        let mut next_segment = |required: bool| -> Result<u64, VersionError> {
-            match parts.next() {
-                Some(seg) => seg
-                    .parse()
-                    .map_err(|_| VersionError::InvalidVersion(s.to_string())),
-                None if required => Err(VersionError::InvalidVersion(s.to_string())),
-                None => Ok(0),
-            }
-        };
-
-        let major = next_segment(true)?;
-        let minor = next_segment(false)?;
-        let patch = next_segment(false)?;
+        let at = |i: usize| release.get(i).copied().unwrap_or(0);
 
         Ok(Version {
-            major,
-            minor,
-            patch,
-            pre_release,
+            epoch,
+            major: at(0),
+            minor: at(1),
+            patch: at(2),
+            release,
+            pre_release: parsed_suffix.pre,
+            post: parsed_suffix.post,
+            dev: parsed_suffix.dev,
             local,
             original: s.to_string(),
         })
+    }
+}
+
+/// Split a leading `N!` epoch off a version string.
+///
+/// Returns `None` when a `!` is present but is not preceded by a pure digit run
+/// - that is malformed input, not an epoch, and must not be silently absorbed.
+fn split_epoch(s: &str) -> Option<(u64, &str)> {
+    match s.find('!') {
+        None => Some((0, s)),
+        Some(idx) => {
+            let head = &s[..idx];
+            if head.is_empty() || !head.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            Some((head.parse().ok()?, &s[idx + 1..]))
+        }
     }
 }
 
@@ -170,37 +244,130 @@ const PRE_RELEASE_MARKERS: [&str; 12] = [
     "dev", "post", "alpha", "beta", "preview", "pre", "rev", "rc", "a", "b", "c", "r",
 ];
 
+/// Spellings PEP 440 normalizes to `.postN`.
+const POST_MARKERS: [&str; 3] = ["post", "rev", "r"];
+
 fn is_identifier_body(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
 }
 
+/// The pre / post / dev parts carried by a version's suffix.
+#[derive(Default)]
+struct Suffix {
+    pre: Option<String>,
+    post: Option<u64>,
+    dev: Option<u64>,
+}
+
+/// One `[separator][letters][digits]` component of a suffix, with the byte
+/// offset it starts at so the caller can slice the original text back out.
+struct Component<'a> {
+    start: usize,
+    word: &'a str,
+    num: Option<u64>,
+}
+
+/// Tokenize a suffix into components. `None` for anything that is not made of
+/// separators, ASCII letters and ASCII digits.
+fn components(s: &str) -> Option<Vec<Component<'_>>> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let start = i;
+        if matches!(bytes[i], b'.' | b'-' | b'_') {
+            i += 1;
+        }
+        let word_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+            i += 1;
+        }
+        let word = &s[word_start..i];
+        let num_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        let num = if num_start == i {
+            None
+        } else {
+            // An overflowing numeric identifier is malformed input, not a zero.
+            Some(s[num_start..i].parse::<u64>().ok()?)
+        };
+        if word.is_empty() && num.is_none() {
+            return None;
+        }
+        out.push(Component { start, word, num });
+    }
+
+    Some(out)
+}
+
+/// Index of the first component whose word is one of `markers`.
+fn find_marker(comps: &[Component<'_>], markers: &[&str]) -> Option<usize> {
+    comps
+        .iter()
+        .position(|c| markers.iter().any(|m| m.eq_ignore_ascii_case(c.word)))
+}
+
+/// Read the number attached to the marker at `idx`, tolerating the separated
+/// spelling (`.post.1`) as well as the joined one (`.post1`). A bare marker
+/// means zero, as PEP 440 says.
+fn marker_number(comps: &[Component<'_>], idx: usize) -> u64 {
+    if let Some(n) = comps[idx].num {
+        return n;
+    }
+    match comps.get(idx + 1) {
+        Some(next) if next.word.is_empty() => next.num.unwrap_or(0),
+        _ => 0,
+    }
+}
+
 /// Classify the remainder left by [`split_release`].
 ///
 /// `None` means "this is not a version at all" - the caller turns it into a
-/// parse error. `Some(None)` means there is no pre-release part.
+/// parse error.
 ///
-/// The returned string is normalized: the introducing separator (`-`, `.` or
+/// The pre-release string is normalized: the introducing separator (`-`, `.` or
 /// `_`) is stripped, so `1.2.3-rc1` and `1.2.3rc1` both yield `"rc1"` and the
-/// comparison in [`compare_prerelease`] sees one consistent form.
-fn parse_prerelease(suffix: &str) -> Option<Option<String>> {
+/// comparison in [`compare_prerelease`] sees one consistent form. Post and dev
+/// releases are lifted out into their own numeric fields, because they are not
+/// pre-releases and cannot be ordered as if they were: `.postN` sorts *above*
+/// the base release and `.devN` below it, and a single `Option<String>` ranked
+/// by identifier can only express one of those two directions.
+fn parse_suffix(suffix: &str) -> Option<Suffix> {
     if suffix.is_empty() {
-        return Some(None);
+        return Some(Suffix::default());
     }
 
     // Semver: everything after the first `-` is the pre-release, whatever it
-    // spells (`1.2.3-1`, `1.2.3-pre`, `1.2.3-alpha.1`).
+    // spells (`1.2.3-1`, `1.2.3-pre`, `1.2.3-alpha.1`). The one exception is a
+    // body that is exactly a post marker plus digits (`1.0.0-post1`), which no
+    // semver project uses as a pre-release tag and which PEP 440 reads as a
+    // post-release.
     if let Some(rest) = suffix.strip_prefix('-') {
-        return if is_identifier_body(rest) {
-            Some(Some(rest.to_string()))
-        } else {
-            None
-        };
+        if !is_identifier_body(rest) {
+            return None;
+        }
+        if let Some(comps) = components(rest)
+            && comps.len() == 1
+            && find_marker(&comps, &POST_MARKERS) == Some(0)
+        {
+            return Some(Suffix {
+                post: Some(marker_number(&comps, 0)),
+                ..Suffix::default()
+            });
+        }
+        return Some(Suffix {
+            pre: Some(rest.to_string()),
+            ..Suffix::default()
+        });
     }
 
     // PEP 440 and the compact semver-adjacent forms: an optional `.`/`_`
-    // separator followed by a known marker word.
+    // separator followed by known marker words.
     let rest = suffix
         .strip_prefix('.')
         .or_else(|| suffix.strip_prefix('_'))
@@ -210,19 +377,46 @@ fn parse_prerelease(suffix: &str) -> Option<Option<String>> {
         return None;
     }
 
-    let word_len = rest.bytes().take_while(u8::is_ascii_alphabetic).count();
-    if word_len == 0 {
-        return None;
-    }
-    let word = &rest[..word_len];
-    if PRE_RELEASE_MARKERS
-        .iter()
-        .any(|m| m.eq_ignore_ascii_case(word))
-    {
-        Some(Some(rest.to_string()))
-    } else {
+    let comps = components(rest)?;
+    let post_idx = find_marker(&comps, &POST_MARKERS);
+    let dev_idx = find_marker(&comps, &["dev"]);
+
+    let post = post_idx.map(|i| marker_number(&comps, i));
+    let dev = dev_idx.map(|i| marker_number(&comps, i));
+
+    // Everything before the first post/dev marker is the pre-release, taken as
+    // the original substring so the field keeps the spelling the registry used.
+    let cut = match (post_idx, dev_idx) {
+        (Some(p), Some(d)) => p.min(d),
+        (Some(p), None) => p,
+        (None, Some(d)) => d,
+        (None, None) => comps.len(),
+    };
+    let pre_text = match comps.get(cut) {
+        Some(c) => &rest[..c.start],
+        None => rest,
+    };
+
+    let pre = if pre_text.is_empty() {
         None
-    }
+    } else {
+        // The leading word still has to be a marker we know; an unrecognized
+        // word means this is not a version and is rejected rather than absorbed.
+        let word_len = pre_text.bytes().take_while(u8::is_ascii_alphabetic).count();
+        if word_len == 0 {
+            return None;
+        }
+        let word = &pre_text[..word_len];
+        if !PRE_RELEASE_MARKERS
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(word))
+        {
+            return None;
+        }
+        Some(pre_text.to_string())
+    };
+
+    Some(Suffix { pre, post, dev })
 }
 
 /// Rank of a known alphabetic marker, lowest first.
@@ -324,28 +518,124 @@ fn compare_prerelease(a: &str, b: &str) -> Ordering {
     left.len().cmp(&right.len())
 }
 
+/// Compare two release tuples of possibly different length, zero-padding the
+/// shorter one so `1.2` and `1.2.0` stay equal while `1.2.3.4` and `1.2.3` do
+/// not.
+fn compare_release(a: &[u64], b: &[u64]) -> Ordering {
+    let len = a.len().max(b.len());
+    for i in 0..len {
+        let ord = a
+            .get(i)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&b.get(i).copied().unwrap_or(0));
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    Ordering::Equal
+}
+
+/// Which side of the base release a version sits on.
+///
+/// The phases are ordered exactly as PEP 440 orders them:
+/// `1.0.dev1 < 1.0a1.dev1 < 1.0a1 < 1.0 < 1.0.post1`. A bare dev-release is its
+/// own phase because it sorts below *every* pre-release, while a dev-release
+/// attached to a pre-release sorts within that pre-release.
+fn phase(v: &Version) -> u8 {
+    if v.pre_release.is_some() {
+        1
+    } else if v.post.is_some() {
+        3
+    } else if v.dev.is_some() {
+        0
+    } else {
+        2
+    }
+}
+
+/// Compare PEP 440 local version segments (`1.0+cu118` vs `1.0+cpu`).
+///
+/// Absent sorts below present, numeric segments sort above alphabetic ones and
+/// compare numerically. Semver would call these equal; see the type-level note
+/// on [`Version`] for why ordering them is the informing choice.
+fn compare_local(a: Option<&String>, b: Option<&String>) -> Ordering {
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(x), Some(y)) => {
+            let seg = |s: &str| -> Vec<Result<u64, String>> {
+                s.split(['.', '-', '_'])
+                    .map(|p| match p.parse::<u64>() {
+                        Ok(n) => Ok(n),
+                        Err(_) => Err(p.to_ascii_lowercase()),
+                    })
+                    .collect()
+            };
+            let (lx, ly) = (seg(x), seg(y));
+            for (l, r) in lx.iter().zip(ly.iter()) {
+                let ord = match (l, r) {
+                    (Ok(p), Ok(q)) => p.cmp(q),
+                    (Ok(_), Err(_)) => Ordering::Greater,
+                    (Err(_), Ok(_)) => Ordering::Less,
+                    (Err(p), Err(q)) => p.cmp(q),
+                };
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+            lx.len().cmp(&ly.len())
+        }
+    }
+}
+
 impl Ord for Version {
     fn cmp(&self, other: &Self) -> Ordering {
-        match self.major.cmp(&other.major) {
+        match self.epoch.cmp(&other.epoch) {
             Ordering::Equal => {}
             ord => return ord,
         }
-        match self.minor.cmp(&other.minor) {
-            Ordering::Equal => {}
-            ord => return ord,
-        }
-        match self.patch.cmp(&other.patch) {
+        match compare_release(&self.release, &other.release) {
             Ordering::Equal => {}
             ord => return ord,
         }
 
-        // Pre-release versions are less than release versions
-        match (&self.pre_release, &other.pre_release) {
-            (None, Some(_)) => Ordering::Greater,
-            (Some(_), None) => Ordering::Less,
-            (Some(a), Some(b)) => compare_prerelease(a, b),
-            (None, None) => Ordering::Equal,
+        match phase(self).cmp(&phase(other)) {
+            Ordering::Equal => {}
+            ord => return ord,
         }
+
+        // Within a phase both sides carry the same kind of marker, so each part
+        // is compared in PEP 440's order: pre, then post, then dev.
+        let pre = match (&self.pre_release, &other.pre_release) {
+            (Some(a), Some(b)) => compare_prerelease(a, b),
+            _ => Ordering::Equal,
+        };
+        if pre != Ordering::Equal {
+            return pre;
+        }
+
+        // A post-release is newer than the release it patches, so absent sorts
+        // below present here.
+        match self.post.cmp(&other.post) {
+            Ordering::Equal => {}
+            ord => return ord,
+        }
+
+        // A dev-release is older than the thing it leads up to, so present
+        // sorts below absent - the reverse of `post`.
+        let dev = match (self.dev, other.dev) {
+            (Some(a), Some(b)) => a.cmp(&b),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        };
+        if dev != Ordering::Equal {
+            return dev;
+        }
+
+        compare_local(self.local.as_ref(), other.local.as_ref())
     }
 }
 
@@ -437,7 +727,9 @@ fn parse_wildcard(s: &str) -> Option<VersionSpec> {
 /// release core of `original` rather than by counting dots in the whole string,
 /// which miscounts `1.2.post1` and `1.2+local`.
 fn declared_precision(v: &Version) -> usize {
-    let (core, _) = split_release(v.original.trim());
+    let trimmed = v.original.trim();
+    let body = split_epoch(trimmed).map_or(trimmed, |(_, rest)| rest);
+    let (core, _) = split_release(body);
     if core.is_empty() {
         3
     } else {
@@ -453,25 +745,52 @@ fn declared_precision(v: &Version) -> usize {
 /// segments is `1.26.0` - unless the version carries a pre-release or local
 /// segment, in which case its own text is kept verbatim.
 fn with_precision(v: &Version, precision: usize) -> Version {
+    // An epoch is part of the version's identity, so a re-rendered version keeps
+    // it: dropping the `1!` would write a spec naming a completely different
+    // release line.
+    let ep = if v.epoch == 0 {
+        String::new()
+    } else {
+        format!("{}!", v.epoch)
+    };
     match precision {
         1 => Version {
+            epoch: v.epoch,
             major: v.major,
             minor: 0,
             patch: 0,
+            release: vec![v.major],
             pre_release: None,
+            post: None,
+            dev: None,
             local: None,
-            original: format!("{}", v.major),
+            original: format!("{ep}{}", v.major),
         },
         2 => Version {
+            epoch: v.epoch,
             major: v.major,
             minor: v.minor,
             patch: 0,
+            release: vec![v.major, v.minor],
             pre_release: None,
+            post: None,
+            dev: None,
             local: None,
-            original: format!("{}.{}", v.major, v.minor),
+            original: format!("{ep}{}.{}", v.major, v.minor),
         },
-        _ if v.pre_release.is_some() || v.local.is_some() => v.clone(),
-        _ => Version::new(v.major, v.minor, v.patch),
+        _ if v.pre_release.is_some()
+            || v.local.is_some()
+            || v.post.is_some()
+            || v.dev.is_some()
+            || v.release.len() > 3 =>
+        {
+            v.clone()
+        }
+        _ => Version {
+            epoch: v.epoch,
+            original: format!("{ep}{}.{}.{}", v.major, v.minor, v.patch),
+            ..Version::new(v.major, v.minor, v.patch)
+        },
     }
 }
 
@@ -863,11 +1182,11 @@ mod tests {
             assert!(v.is_prerelease(), "{s} should be flagged pre-release");
         }
 
-        // A PEP 440 post-release keeps its patch number too. Whether it is a
-        // *pre*-release is a separate, still-open question - it is not, and
-        // sorts above the bare release - so only the numbers are pinned here.
+        // A PEP 440 post-release keeps its patch number too, and is not a
+        // pre-release: see `post_releases_sort_above_their_base`.
         let v = Version::from_str("1.2.3.post1").unwrap();
         assert_eq!((v.major, v.minor, v.patch), (1, 2, 3));
+        assert!(!v.is_prerelease());
 
         assert_ne!(
             Version::from_str("1.2.3-rc1").unwrap(),
@@ -1083,6 +1402,111 @@ mod tests {
             VersionSpec::parse(">=1.0,<2.0").unwrap(),
             VersionSpec::Range { .. }
         ));
+    }
+
+    // A post-release is strictly newer than the release it patches. Ranking it
+    // as a pre-release made pcu report a package one release behind, and made
+    // its global mode print `1.4.0.post1 -> 1.4.0` with an upgrade command that
+    // was a downgrade.
+    #[test]
+    fn post_releases_sort_above_their_base() {
+        let lt = |a: &str, b: &str| {
+            let (va, vb) = (Version::from_str(a).unwrap(), Version::from_str(b).unwrap());
+            assert!(va < vb, "expected {a} < {b}");
+        };
+
+        lt("1.4.0", "1.4.0.post1");
+        lt("1.4.0.post1", "1.4.0.post2");
+        lt("1.4.0.post2", "1.4.1");
+        lt("1.4.0rc1", "1.4.0.post1");
+        lt("1.0.0-post1", "1.0.0.post2");
+
+        for s in ["1.4.0.post1", "1.4.0post1", "1.4.0.post", "1.4.0-post1"] {
+            let v = Version::from_str(s).unwrap();
+            assert!(!v.is_prerelease(), "{s} is not a pre-release");
+            assert!(v.is_postrelease(), "{s} is a post-release");
+        }
+
+        assert_eq!(Version::from_str("1.4.0.post1").unwrap().post, Some(1));
+        assert_eq!(Version::from_str("1.4.0.post").unwrap().post, Some(0));
+        assert_eq!(Version::from_str("1.4.0.post.3").unwrap().post, Some(3));
+    }
+
+    // Dev releases sit below everything at the same release, including
+    // pre-releases, and a dev release attached to a pre or post sorts within it.
+    #[test]
+    fn dev_releases_sort_below_everything_at_the_same_release() {
+        let lt = |a: &str, b: &str| {
+            let (va, vb) = (Version::from_str(a).unwrap(), Version::from_str(b).unwrap());
+            assert!(va < vb, "expected {a} < {b}");
+        };
+
+        lt("1.0.dev1", "1.0a1");
+        lt("1.0a1.dev1", "1.0a1");
+        lt("1.0.dev1", "1.0.dev2");
+        lt("1.0a1", "1.0");
+        lt("1.0", "1.0.post1.dev1");
+        lt("1.0.post1.dev1", "1.0.post1");
+
+        assert!(Version::from_str("1.0.dev1").unwrap().is_prerelease());
+    }
+
+    // An epoch reset is how a project starts its version numbering over. Before
+    // it parsed, every release published after the reset was dropped and the
+    // tool named an older version as latest.
+    #[test]
+    fn epoch_parses_and_dominates_the_release() {
+        let v = Version::from_str("1!2.0.0").unwrap();
+        assert_eq!(v.epoch, 1);
+        assert_eq!((v.major, v.minor, v.patch), (2, 0, 0));
+        assert_eq!(v.to_string(), "1!2.0.0");
+
+        let low = Version::from_str("99.0.0").unwrap();
+        assert!(low < v, "an epoch outranks any release tuple");
+        assert!(Version::from_str("1!0.1").unwrap() > low);
+
+        let mut versions = ["2023.1", "1!1.0", "2024.2"]
+            .iter()
+            .map(|s| Version::from_str(s).unwrap())
+            .collect::<Vec<_>>();
+        versions.sort();
+        assert_eq!(versions.last().unwrap().original, "1!1.0");
+
+        // A `!` that is not an epoch is malformed, not something to absorb.
+        assert!(Version::from_str("a!1.0").is_err());
+        assert!(Version::from_str("!1.0").is_err());
+    }
+
+    // The release tuple is not three fields. Truncating at the patch made
+    // `1.2.3.4` and `1.2.3.5` compare equal, so a four-segment release could
+    // never be reported as an update over its predecessor.
+    #[test]
+    fn release_tuple_keeps_every_segment() {
+        let v = Version::from_str("1.2.3.4").unwrap();
+        assert_eq!(v.release, vec![1, 2, 3, 4]);
+        assert!(Version::from_str("1.2.3.4").unwrap() < Version::from_str("1.2.3.5").unwrap());
+        assert!(Version::from_str("1.2.3").unwrap() < Version::from_str("1.2.3.1").unwrap());
+        assert_eq!(
+            Version::from_str("1.2").unwrap(),
+            Version::from_str("1.2.0").unwrap()
+        );
+    }
+
+    // PEP 440 orders local versions, so two builds of the same release are two
+    // different releases. Semver excludes build metadata from precedence; the
+    // deviation is deliberate and documented on `Version`.
+    #[test]
+    fn local_segments_are_ordered_not_ignored() {
+        let cpu = Version::from_str("1.0.0+cpu").unwrap();
+        let cu = Version::from_str("1.0.0+cu118").unwrap();
+        assert_ne!(cpu, cu);
+        assert!(cpu < cu);
+        assert!(Version::from_str("1.0.0").unwrap() < cpu);
+        assert!(Version::from_str("1.0.0+1").unwrap() > Version::from_str("1.0.0+abc").unwrap());
+        assert!(
+            Version::from_str("1.0.0+build.2").unwrap()
+                > Version::from_str("1.0.0+build.1").unwrap()
+        );
     }
 
     #[test]

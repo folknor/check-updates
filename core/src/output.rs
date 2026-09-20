@@ -1,4 +1,4 @@
-use crate::types::{DependencyCheck, UpdateSeverity};
+use crate::types::{DependencyCheck, UpdateBlocker, UpdateSeverity};
 use colored::Colorize;
 use std::collections::HashSet;
 
@@ -121,17 +121,68 @@ impl TableRenderer {
         println!("{header}\n");
 
         for check in checks {
-            self.print_row(check, max_name, max_from, max_to);
+            println!("{}", self.format_row(check, max_name, max_from, max_to));
+        }
+
+        let legend = self.blocker_legend(checks);
+        if !legend.is_empty() {
+            println!();
+            for line in legend {
+                println!("{line}");
+            }
         }
     }
 
-    fn print_row(
+    /// Print one line per distinct reason `-u` cannot act on a row in the table.
+    ///
+    /// The rows themselves carry only a short marker, because the explanation
+    /// is per-reason and not per-row: a package.json full of hyphen ranges
+    /// would otherwise repeat the same sentence twenty times and push the
+    /// version columns off the terminal. The legend is printed only when a
+    /// marker was actually rendered, so an ordinary table is unchanged.
+    ///
+    /// `resolution-principles` rule 3: these rows stay in the table. The
+    /// legend is what stops them reading as "an update `-u` will apply".
+    pub fn blocker_legend(&self, checks: &[&DependencyCheck]) -> Vec<String> {
+        let mut seen: Vec<UpdateBlocker> = Vec::new();
+        for blocker in checks.iter().filter_map(|c| c.update_blocker()) {
+            if !seen.contains(&blocker) {
+                seen.push(blocker);
+            }
+        }
+
+        seen.into_iter()
+            .map(|blocker| {
+                let count = checks
+                    .iter()
+                    .filter(|c| c.update_blocker() == Some(blocker))
+                    .count();
+                let marker = self.paint_marker(blocker.marker());
+                format!("  {marker}  {count} row(s): {}", blocker.explanation())
+            })
+            .collect()
+    }
+
+    /// Markers are yellow, never red or green: they are neither a severity nor
+    /// an error, and colouring them like one invites the reader to compare them
+    /// with the severity column they sit next to.
+    fn paint_marker(&self, marker: &str) -> String {
+        if self.show_colors {
+            marker.yellow().to_string()
+        } else {
+            marker.to_string()
+        }
+    }
+
+    /// Build one row. Returned rather than printed so the marker placement can
+    /// be asserted in a test without capturing stdout.
+    fn format_row(
         &self,
         check: &DependencyCheck,
         name_width: usize,
         from_width: usize,
         to_width: usize,
-    ) {
+    ) -> String {
         let from = check
             .current_version()
             .map(std::string::ToString::to_string)
@@ -143,7 +194,18 @@ impl TableRenderer {
             .map(std::string::ToString::to_string)
             .unwrap_or_default();
 
-        let severity_str = self.format_severity(check.severity);
+        // The marker rides in the severity column rather than replacing it.
+        // Both facts matter and they are independent: the severity says how big
+        // the jump is, the marker says `-u` will not make it. Dropping the
+        // severity to make room would hide the size of what the user now has to
+        // apply by hand.
+        let severity_str = match (self.format_severity(check.severity), check.update_blocker()) {
+            (severity, None) => severity,
+            (severity, Some(blocker)) if severity.is_empty() => self.paint_marker(blocker.marker()),
+            (severity, Some(blocker)) => {
+                format!("{severity} {}", self.paint_marker(blocker.marker()))
+            }
+        };
 
         let available_hint = if check.has_newer_available() {
             format!("  ({} available)", check.latest)
@@ -170,7 +232,7 @@ impl TableRenderer {
             from_w = from_width,
             to_w = to_width,
         );
-        println!("{}", row.trim_end());
+        row.trim_end().to_string()
     }
 
     /// Format severity with optional colors
@@ -204,6 +266,82 @@ impl TableRenderer {
 
 #[cfg(test)]
 mod tests {
+    use super::TableRenderer;
+    use crate::types::{Dependency, DependencyCheck, UpdateSeverity};
+    use crate::version::{Version, VersionSpec};
+    use std::path::PathBuf;
+
+    fn check(spec: VersionSpec, rewritable: bool) -> DependencyCheck {
+        let target = Version::new(1, 9, 0);
+        DependencyCheck {
+            dependency: Dependency {
+                name: "react".to_string(),
+                version_spec: spec,
+                source_file: PathBuf::from("package.json"),
+                line_number: Some(3),
+                original_line: String::new(),
+                manifest_key: None,
+                section: Some("dependencies".to_string()),
+            },
+            installed: Some(Version::new(1, 2, 3)),
+            in_range: None,
+            latest: target.clone(),
+            target: Some(target.clone()),
+            target_spec: rewritable.then(|| VersionSpec::Caret(target.clone())),
+            severity: Some(UpdateSeverity::Minor),
+            force_spec: rewritable.then_some(VersionSpec::Caret(target)),
+            installed_released_at: None,
+            target_released_at: None,
+            latest_released_at: None,
+        }
+    }
+
+    /// The failure this exists to prevent: a row `-u` cannot write rendering
+    /// exactly like one it will.
+    #[test]
+    fn blocked_row_is_marked_and_writable_row_is_not() {
+        let renderer = TableRenderer::new(false);
+
+        let writable = check(VersionSpec::Caret(Version::new(1, 2, 3)), true);
+        let row = renderer.format_row(&writable, 8, 6, 6);
+        assert!(
+            row.ends_with("minor"),
+            "an actionable row is unchanged: {row}"
+        );
+
+        let blocked = check(VersionSpec::Complex("1.x".to_string()), false);
+        let row = renderer.format_row(&blocked, 8, 6, 6);
+        assert!(
+            row.contains("1.9.0"),
+            "the row keeps its target - shown, not dropped: {row}"
+        );
+        assert!(
+            row.contains("minor") && row.contains("[not updatable: spec]"),
+            "severity and blocker are independent facts: {row}"
+        );
+    }
+
+    /// The explanation is per-reason, printed once, with a count - not repeated
+    /// on every row.
+    #[test]
+    fn legend_lists_each_reason_once_with_a_count() {
+        let renderer = TableRenderer::new(false);
+        let a = check(VersionSpec::Complex("1.x".to_string()), false);
+        let b = check(VersionSpec::Complex("1.2.3 - 2.0.0".to_string()), false);
+        let c = check(VersionSpec::Any, false);
+        let ok = check(VersionSpec::Caret(Version::new(1, 2, 3)), true);
+
+        let legend = renderer.blocker_legend(&[&a, &b, &c, &ok]);
+        assert_eq!(legend.len(), 2, "one line per distinct reason: {legend:?}");
+        assert!(legend[0].contains("2 row(s)"), "{legend:?}");
+        assert!(legend[1].contains("1 row(s)"), "{legend:?}");
+
+        assert!(
+            renderer.blocker_legend(&[&ok]).is_empty(),
+            "an ordinary table prints no legend"
+        );
+    }
+
     /// Guards the assumption documented in `render_deduped`: `{:<w$}` measures
     /// the padded string in `char`s, so column widths must be counted the same
     /// way. If this ever fails, the width computation needs to change with it.

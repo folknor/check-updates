@@ -83,15 +83,40 @@ under that name; conda has 2.x) are either reported as fetch errors or, worse,
 compared against a completely unrelated project's version and offered as an
 update. Poetry's `python` key is explicitly skipped; conda's `python` is not.
 
-The hunter's position: conda support as written cannot be right without a conda
-channel client - either write one, or drop the conda claim.
+The hunter's position was: write a conda channel client, or drop the conda
+claim. A third option shipped instead - keep parsing and listing conda
+dependencies, stop resolving them against PyPI, and say plainly why. The
+principles page decides it: inventing information is worse than silence, but a
+row that cannot be checked must still be shown with an honest reason rather than
+dropped.
 
-Sharpened rather than eased by the DSC-011 work. `conda.rs` now parses MatchSpec
-properly, so `python=3.9.*` is a well-formed `Wildcard` being compared against
-PyPI's unrelated `python` package - the garbage is better-formed garbage. The
-fix did leave a ready-made discriminator: conda dependencies now carry
-`section: Some("dependencies")` or `Some("dependencies.pip")`, so `main.rs` can
-route or exclude conda-channel packages without re-parsing anything.
+`pcu/src/main.rs` now partitions conda-channel dependencies out before
+`package_names` is built, so nothing conda-owned reaches `PyPiClient`, the
+resolver, **or `FileUpdater`** - the entry did not mention the write path, but
+`-u` could previously rewrite a conda pin in `environment.yml` from a PyPI
+stub's version history. They are listed under "Not checked (N) - conda channel
+packages, which pcu cannot resolve" and emitted in `--json` with
+`kind: registry_unsupported`.
+
+Note the discriminator is source file *plus* section, not section alone:
+`pyproject.rs` also emits `section: Some("dependencies")`, so keying on the
+section string would have silently excluded every PEP 621 dependency.
+
+What remains open:
+
+- A conda channel client, honestly scoped: `repodata.json` is one document per
+  (channel, subdir), hundreds of MB, with no per-package endpoint, so it needs a
+  disk cache keyed on ETag - and this workspace has no HTTP caching layer at
+  all. Plus conda's own version semantics (build strings, `build_number` as a
+  tiebreaker) as a third comparison dialect, and `python` is itself a conda
+  dependency whose selection interacts with the solver. Weeks, not a wave.
+- A conda dependency is still a footnote rather than a table row, because
+  `DependencyCheck::latest` is a non-optional `Version` and cannot represent
+  "found, deliberately not checked". Same root cause as RPT-002.
+- "The interpreter is not a registry package" is now enforced in two places by
+  two different mechanisms - Poetry's `python` key is skipped in the pyproject
+  parser, conda's `python` is excluded in `main.rs`. A third manifest format
+  will get it wrong a third time.
 
 ## DSC-007 - npm range syntax the parser cannot model is silently reinterpreted, then rewritten
 
@@ -174,41 +199,6 @@ ate the include directives.
 The precise rule not yet implemented: `.`->`-` and run collapsing, so that
 `zope.interface` and `foo--bar` produce keys matching registry and lock-file
 keys.
-
-## DSC-014 - pcu's `can_parse` claims lock formats `parse` does not handle
-
-Reported by pcu-parsers.
-
-`can_parse` returns true for `Pipfile.lock` and `conda-lock.yml`, but `parse`
-has no arm for either and `bail!`s "Unsupported lock file" - any caller trusting
-`can_parse` gets a hard error. `find_and_parse` is narrower still: it probes only
-`uv.lock`, `poetry.lock`, `pdm.lock`, with no `Pipfile.lock`, no
-`requirements.lock`, and no search outside the top directory. Most pip projects
-therefore have *no* installed versions and every row is compared against the
-declared spec instead.
-
-Also: `insert` on duplicate package names (common in `poetry.lock`/`uv.lock` for
-platform- or marker-split resolutions) keeps whichever came last rather than the
-applicable or maximum one. Unparsable versions are `eprintln!`'d and dropped, so
-the dependency looks uninstalled. `PdmLockFile`/`PdmPackage` are byte-for-byte
-duplicates of `TomlLockFile`/`TomlPackage`, and the three parse functions are
-the same function three times.
-
-The duplicate-name half has a settled answer to copy, and the order of its steps
-is the whole point. `ncu`'s lock-file parsers now take, in order: the root
-project's *own resolved copy* where the format states it (npm and bun place the
-root's deps at top level by construction; pnpm's `importers["."]` names the
-resolution outright), then the highest candidate satisfying the root's declared
-range, then the highest of all.
-
-Steps 2 and 3 are fallbacks, not the rule. Getting this wrong is easy and was
-gotten wrong once already in this wave: "highest satisfying the declared range"
-alone picks a nested copy whenever a transitive dependency pulled in something
-newer than the root's hoisted copy, which is not what the root actually gets.
-
-Its three normalization sites (`.to_lowercase().replace('_', "-")`) should also
-call `pep508::normalize_name` rather than open-coding the rule - that is the
-precondition for DSC-013's remaining half.
 
 ## DSC-015 - binary `bun.lockb` still cannot be read
 
