@@ -1,0 +1,35 @@
+[archetypes]
+# No persona at all: the prompt is the whole instruction. Use this when the
+# output has to stay auditable after the fact - a primed persona is a hidden
+# instruction shaping the answer that nobody can see in the transcript.
+bare = ""
+
+[_defaults]
+providers = ["codex"]
+
+# Profiles are tiers, not roles: any archetype can take any profile, so they
+# name depth and write access rather than the job. Both state their sandbox;
+# leaving it unset inherits an ambient codex default nobody reads, and `deep` is
+# the review tier, where a reviewer that can edit the tree is a bug.
+[plantasjen.codex.deep]
+model = "gpt-5.6-sol"
+effort = "low"
+sandbox = "read-only"
+
+[plantasjen.codex.build]
+model = "gpt-5.6-sol"
+effort = "low"
+sandbox = "workspace-write"
+
+[bygg.codex.deep]
+model = "gpt-5.6-sol"
+effort = "low"
+sandbox = "read-only"
+
+[bygg.codex.build]
+model = "gpt-5.6-sol"
+effort = "low"
+sandbox = "workspace-write"
+
+[_audit]
+id = "7436"

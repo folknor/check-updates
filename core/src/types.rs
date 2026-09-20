@@ -84,7 +84,14 @@ pub struct DependencyCheck {
     pub dependency: Dependency,
     /// Currently installed version (from lock file)
     pub installed: Option<Version>,
-    /// Latest version within the constraint
+    /// The latest version this dependency can move to while staying within the
+    /// spirit of its constraint.
+    ///
+    /// For a bounded spec that is the maximum version the spec accepts. For an
+    /// unbounded floor (`>=`, `>`) it is the newest release in the major series
+    /// the dependency is on, because every published version satisfies such a
+    /// spec and the unrestricted answer would just repeat `latest`. See
+    /// `DependencyResolver::calculate_in_range` for the full reasoning.
     pub in_range: Option<Version>,
     /// Absolute latest version
     pub latest: Version,

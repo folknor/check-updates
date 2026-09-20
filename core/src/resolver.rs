@@ -19,7 +19,8 @@ impl DependencyResolver {
         let latest = package_info.latest.clone();
 
         // Calculate "in range" - latest version that satisfies the constraint
-        let in_range = self.calculate_in_range(&dependency.version_spec, &package_info.versions);
+        let in_range =
+            self.calculate_in_range(&dependency.version_spec, &package_info.versions, installed);
 
         // Determine the target version for display
         let current = installed.or_else(|| dependency.version_spec.base_version());
@@ -134,36 +135,56 @@ impl DependencyResolver {
         }
     }
 
-    /// The latest available version that satisfies the constraint.
+    /// The latest version this dependency can move to while staying within the
+    /// spirit of its declared constraint.
     ///
-    /// There is exactly one definition of "in range" and it lives in
-    /// [`VersionSpec::satisfies`]. This function only takes the maximum of what
-    /// that predicate accepts.
+    /// For every bounded spec that is exactly "the maximum version the spec
+    /// accepts", so the answer comes straight from
+    /// [`VersionSpec::satisfies`].
     ///
-    /// It used to add a second, undocumented rule on top: for `Minimum` and
-    /// `GreaterThan` - two of thirteen variants - it discarded every candidate
-    /// outside the major series of the base or installed version. That made
-    /// `DependencyCheck.in_range` something other than what `types.rs` documents
-    /// it to be, and made the field disagree with the predicate the same crate
-    /// exposes: `>=2.28.0` is satisfied by 3.1.0 by any reading of the spec, in
-    /// Cargo and in PEP 440 alike. A tool that reports otherwise is lying about
-    /// the user's own constraint.
+    /// `Minimum` and `GreaterThan` need an extra rule, and it is deliberate.
+    /// An unbounded spec is satisfied by every version ever published, so
+    /// "the maximum satisfying version" degenerates to "the latest version" and
+    /// the answer carries no information at all - `in_range` would simply
+    /// duplicate `latest`, and [`DependencyCheck::has_newer_available`] would be
+    /// permanently false, suppressing the "(x.y.z available)" hint precisely
+    /// when there is something to hint at.
     ///
-    /// Caution about major versions belongs to the severity axis, not to this
-    /// one: a `>=` dependency whose in-range latest crosses a major boundary is
-    /// classified `Major`, and `will_update` refuses it in every mode but
-    /// `--force`. The behaviour that changes is that `-u`/`-um` no longer raise
-    /// the floor of an unbounded spec to the newest same-major release; raising
-    /// a floor was never required by the constraint, and doing it silently hid
-    /// the real (major) update behind a minor-looking one.
+    /// So for those two variants "in range" means the newest release in the
+    /// major series the dependency is actually on - `base.major`, raised to the
+    /// installed major when the lock file has moved past the declared floor.
+    /// A `>=2.28.0` dependency installed at 2.28.0 with 2.32.3 and 3.1.0
+    /// published is offered 2.32.3, and told 3.1.0 exists.
+    ///
+    /// This is not a contradiction of `satisfies`. `satisfies` answers "may this
+    /// version be used?", which 3.1.0 may; this answers "where should we move
+    /// to?", which is a different question and the only one with a useful answer
+    /// for an unbounded floor. Crossing a major boundary stays available through
+    /// `--force`, where it is an explicit choice rather than a silent one.
     fn calculate_in_range(
         &self,
         spec: &VersionSpec,
         available_versions: &[Version],
+        installed: Option<&Version>,
     ) -> Option<Version> {
         available_versions
             .iter()
-            .filter(|v| spec.satisfies(v))
+            .filter(|v| {
+                if !spec.satisfies(v) {
+                    return false;
+                }
+
+                match spec {
+                    VersionSpec::Minimum(base) | VersionSpec::GreaterThan(base) => {
+                        let series = match installed {
+                            Some(inst) => base.major.max(inst.major),
+                            None => base.major,
+                        };
+                        v.major == series
+                    }
+                    _ => true,
+                }
+            })
             .max()
             .cloned()
     }
@@ -265,11 +286,13 @@ mod tests {
         assert!(result.will_update(false, false));
     }
 
-    // One definition of "in range": whatever `satisfies` accepts. An unbounded
-    // minimum is satisfied by the next major, and we say so - the major update
-    // is then withheld by severity, not by pretending it is out of range.
+    // An unbounded floor is satisfied by every version ever published, so
+    // "maximum satisfying version" would just be `latest` and the field would
+    // carry nothing. "In range" for `>=` therefore means the newest release in
+    // the series the dependency is on: the user is offered 2.32.3 and told that
+    // 3.1.0 exists, rather than being offered nothing and told nothing.
     #[test]
-    fn unbounded_minimum_is_in_range_across_majors() {
+    fn unbounded_minimum_stays_in_its_major_series() {
         let resolver = DependencyResolver::new();
         let dep = create_test_dependency("requests", ">=2.28.0");
         let pkg_info = create_package_info("requests", &["2.28.0", "2.32.3", "3.1.0"]);
@@ -277,10 +300,28 @@ mod tests {
         let installed = Version::from_str("2.28.0").unwrap();
         let result = resolver.resolve(&dep, &pkg_info, Some(&installed));
 
-        assert_eq!(result.in_range.as_ref().unwrap().to_string(), "3.1.0");
-        assert_eq!(result.severity, Some(UpdateSeverity::Major));
-        assert!(!result.will_update(true, false));
-        assert!(result.will_update(false, true));
+        assert_eq!(result.in_range.as_ref().unwrap().to_string(), "2.32.3");
+        assert_eq!(result.severity, Some(UpdateSeverity::Minor));
+        assert!(result.will_update(true, false));
+
+        // The major release is still reachable, and still visible.
+        assert!(result.has_newer_available());
+        assert_eq!(result.latest.to_string(), "3.1.0");
+        assert_eq!(result.force_spec.as_ref().unwrap().to_string(), ">=3.1.0");
+    }
+
+    // The floor rises with the lock file: a dependency declared `>=1.0.0` but
+    // installed at 2.x is on the 2.x series, not the 1.x one its spec names.
+    #[test]
+    fn installed_major_raises_the_series_above_the_declared_floor() {
+        let resolver = DependencyResolver::new();
+        let dep = create_test_dependency("serde", ">=1.0.0");
+        let pkg_info = create_package_info("serde", &["1.0.9", "2.1.0", "2.4.2", "3.0.0"]);
+
+        let installed = Version::from_str("2.1.0").unwrap();
+        let result = resolver.resolve(&dep, &pkg_info, Some(&installed));
+
+        assert_eq!(result.in_range.as_ref().unwrap().to_string(), "2.4.2");
     }
 
     #[test]
