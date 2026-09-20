@@ -82,6 +82,13 @@ update that is reported enthusiastically and written conservatively is the
 intended shape.
 
 Nor does it license inventing information. Reporting a version that does not
-exist, or comparing against an unrelated package, is worse than silence -
-see the conda-versus-PyPI problem in `notes/`, where the tool currently offers
-updates computed from a different project's version history.
+exist, or comparing against an unrelated package, is worse than silence.
+
+The case that settled this: pcu used to resolve conda-channel dependencies from
+`environment.yml` against PyPI, because it had one registry client and used it
+for everything. `python`, `mkl` and `cudatoolkit` came back as fetch errors, and
+`pytorch` matched an abandoned PyPI stub with no relation to the conda package
+of the same name - so the user was offered an update computed from a different
+project's version history, and `-u` would have written it. Those dependencies
+are now listed as deliberately unchecked, with the reason, which is the correct
+shape: say what you do not know rather than guessing at it.

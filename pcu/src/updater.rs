@@ -5,6 +5,29 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// A package the updater was asked to rewrite but did not: the recorded line
+/// was missing or out of range, or the spec was not where the parser claimed.
+///
+/// Unlike ccu's equivalent - which has exactly one failure mode, a document
+/// lookup that found nothing - pcu can miss for three distinct reasons, and the
+/// reason is what tells the user whether to suspect the parser, the file having
+/// changed under the run, or a spec the parser normalized differently. So the
+/// record carries a `reason` string.
+#[derive(Debug, Clone)]
+pub struct NotApplied {
+    pub name: String,
+    pub reason: String,
+    pub file: PathBuf,
+}
+
+/// Per-file result of a rewrite attempt.
+struct FileOutcome {
+    /// Names whose spec was actually rewritten on disk
+    applied: Vec<String>,
+    /// Names selected for writing that the line lookup never reached
+    not_applied: Vec<NotApplied>,
+}
+
 /// Updates dependency files with new versions
 pub struct FileUpdater;
 
@@ -64,18 +87,27 @@ impl FileUpdater {
         // actually changed; a check whose spec could not be located in its
         // source line leaves the file untouched and must not be counted as a
         // modification, so a no-op run leaves the file and its mtime alone.
-        for (file_path, updates) in file_updates {
-            let applied = self
+        // Sorted so a multi-file run reports a stable order.
+        let mut file_paths: Vec<PathBuf> = file_updates.keys().cloned().collect();
+        file_paths.sort();
+
+        let mut not_applied = Vec::new();
+
+        for file_path in file_paths {
+            let updates = file_updates.remove(&file_path).unwrap_or_default();
+            let outcome = self
                 .update_file(&file_path, &updates)
                 .with_context(|| format!("Failed to update file: {}", file_path.display()))?;
 
-            if applied.is_empty() {
+            not_applied.extend(outcome.not_applied);
+
+            if outcome.applied.is_empty() {
                 continue;
             }
 
             // Only packages whose spec was really rewritten count towards the
             // "updated in multiple files" note.
-            for name in applied {
+            for name in outcome.applied {
                 package_file_map
                     .entry(name)
                     .or_default()
@@ -108,18 +140,22 @@ impl FileUpdater {
             modified_files,
             multi_file_packages,
             package_managers,
+            not_applied,
         })
     }
 
     /// Update a single file with the given dependency updates.
     ///
-    /// Returns the names of the packages whose spec was actually rewritten. An
-    /// empty result means nothing changed and nothing was written.
+    /// Reports both the names whose spec was actually rewritten and the ones
+    /// the line lookup never reached. An empty `applied` means nothing changed
+    /// and nothing was written. The misses have to be carried back: every entry
+    /// here was already displayed to the user as an update, so dropping it on
+    /// the floor reports a write that did not happen.
     fn update_file(
         &self,
         file_path: &Path,
         updates: &[(&DependencyCheck, String)],
-    ) -> Result<Vec<String>> {
+    ) -> Result<FileOutcome> {
         // Read the entire file
         let content = fs::read_to_string(file_path)
             .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
@@ -137,6 +173,12 @@ impl FileUpdater {
         sorted_updates.sort_by_key(|x| std::cmp::Reverse(x.0.dependency.line_number));
 
         let mut applied: Vec<String> = Vec::new();
+        let mut not_applied: Vec<NotApplied> = Vec::new();
+        let miss = |check: &DependencyCheck, reason: String| NotApplied {
+            name: check.dependency.name.clone(),
+            reason,
+            file: file_path.to_path_buf(),
+        };
 
         // Apply each update
         for (check, new_version) in sorted_updates {
@@ -145,12 +187,25 @@ impl FileUpdater {
             // file alone: guessing a line is how the wave-1 findings got
             // wrong-line rewrites.
             let Some(line_number) = check.dependency.line_number else {
+                not_applied.push(miss(
+                    check,
+                    "the parser recorded no line for the declaration".to_string(),
+                ));
                 continue;
             };
             let line_idx = line_number.saturating_sub(1);
 
             if line_idx >= lines.len() {
-                continue; // Skip if line number is out of bounds
+                // Line number out of bounds: the file has fewer lines than the
+                // parse said, so it changed under the run.
+                not_applied.push(miss(
+                    check,
+                    format!(
+                        "recorded line {line_number} is past the end of the file ({} lines)",
+                        lines.len()
+                    ),
+                ));
+                continue;
             }
 
             let original_line = &lines[line_idx].text;
@@ -162,12 +217,21 @@ impl FileUpdater {
                 new_version,
                 file_path,
             ) else {
-                // Spec not found on the recorded line: report nothing rather
+                // Spec not found on the recorded line: report the miss rather
                 // than claiming an update we did not make.
+                not_applied.push(miss(
+                    check,
+                    format!(
+                        "spec `{}` was not found on line {line_number}",
+                        check.dependency.version_spec
+                    ),
+                ));
                 continue;
             };
 
             if updated_line == *original_line {
+                // The line already carries the new spec. Nothing was promised
+                // that is not already true on disk, so this is not a miss.
                 continue;
             }
 
@@ -177,7 +241,10 @@ impl FileUpdater {
 
         if applied.is_empty() {
             // No effective change: do not rewrite the file and disturb its mtime.
-            return Ok(Vec::new());
+            return Ok(FileOutcome {
+                applied,
+                not_applied,
+            });
         }
 
         let mut new_content = String::with_capacity(content.len());
@@ -189,7 +256,10 @@ impl FileUpdater {
         write_atomically(file_path, new_content.as_bytes())
             .with_context(|| format!("Failed to write file: {}", file_path.display()))?;
 
-        Ok(applied)
+        Ok(FileOutcome {
+            applied,
+            not_applied,
+        })
     }
 
     /// Replace version specification in a line.
@@ -503,9 +573,25 @@ pub struct UpdateResult {
     pub multi_file_packages: Vec<String>,
     /// Package managers detected (for sync command suggestions)
     pub package_managers: HashSet<PackageManager>,
+    /// Updates that were selected for writing but never applied to a line
+    pub not_applied: Vec<NotApplied>,
 }
 
 impl UpdateResult {
+    /// Warn about selected updates that never reached a line. These were
+    /// displayed as updates, so staying silent would report a write that did
+    /// not happen. Written to stderr so `--json` keeps stdout to itself.
+    pub fn print_not_applied(&self) {
+        for miss in &self.not_applied {
+            eprintln!(
+                "warning: {} was not updated in {}: {}",
+                miss.name,
+                miss.file.display(),
+                miss.reason
+            );
+        }
+    }
+
     /// Print post-update messages
     pub fn print_summary(&self) {
         if self.multi_file_packages.is_empty() && self.package_managers.is_empty() {
@@ -853,7 +939,110 @@ mod tests {
             result.modified_files.is_empty(),
             "nothing was written, so nothing may be reported"
         );
+        assert_eq!(result.not_applied.len(), 1, "{:?}", result.not_applied);
+        assert_eq!(result.not_applied[0].name, "requests");
         assert_eq!(fs::read_to_string(&temp_path)?, before);
+
+        Ok(())
+    }
+
+    /// A spec the parser normalized differently is a deliberate non-match; it
+    /// must stay a non-match, but it must now be a *reported* one. Displaying
+    /// the row and then writing nothing silently is the contradiction.
+    #[test]
+    fn test_unanchored_spec_is_reported_not_silently_dropped() -> Result<()> {
+        use crate::parsers::Dependency;
+        use check_updates_core::{Version, VersionSpec};
+
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "numpy >= 1.0, < 2.0")?;
+        file.flush()?;
+        let temp_path = file.path().to_path_buf();
+        let before = fs::read_to_string(&temp_path)?;
+
+        let check = DependencyCheck {
+            dependency: Dependency {
+                name: "numpy".to_string(),
+                // Normalized form: `>=1.0,<2.0`, which is not the file's spelling.
+                version_spec: VersionSpec::parse(">=1.0,<2.0").context("old spec")?,
+                source_file: temp_path.clone(),
+                line_number: Some(1),
+                original_line: "numpy >= 1.0, < 2.0".to_string(),
+                manifest_key: None,
+                section: None,
+            },
+            installed: Some(Version::new(1, 0, 0)),
+            in_range: Some(Version::new(1, 0, 1)),
+            latest: Version::new(1, 0, 1),
+            target: Some(Version::new(1, 0, 1)),
+            target_spec: Some(VersionSpec::parse(">=1.0.1,<2.0").context("target spec")?),
+            severity: Some(UpdateSeverity::Patch),
+            force_spec: Some(VersionSpec::parse(">=1.0.1,<2.0").context("force spec")?),
+            installed_released_at: None,
+            target_released_at: None,
+            latest_released_at: None,
+            check_failed: false,
+        };
+
+        let updater = FileUpdater::new();
+        let result = updater.apply_updates(&[check], false, false)?;
+
+        assert!(result.modified_files.is_empty());
+        assert_eq!(result.not_applied.len(), 1, "{:?}", result.not_applied);
+        assert_eq!(result.not_applied[0].name, "numpy");
+        assert!(
+            result.not_applied[0].reason.contains("not found on line 1"),
+            "{}",
+            result.not_applied[0].reason
+        );
+        assert_eq!(fs::read_to_string(&temp_path)?, before);
+
+        Ok(())
+    }
+
+    /// A line number past the end of the file is a miss, not a silent skip.
+    #[test]
+    fn test_out_of_bounds_line_is_reported() -> Result<()> {
+        use crate::parsers::Dependency;
+        use check_updates_core::{Version, VersionSpec};
+
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "requests==2.28.0")?;
+        file.flush()?;
+        let temp_path = file.path().to_path_buf();
+
+        let check = DependencyCheck {
+            dependency: Dependency {
+                name: "requests".to_string(),
+                version_spec: VersionSpec::Pinned(Version::new(2, 28, 0)),
+                source_file: temp_path.clone(),
+                line_number: Some(99),
+                original_line: "requests==2.28.0".to_string(),
+                manifest_key: None,
+                section: None,
+            },
+            installed: Some(Version::new(2, 28, 0)),
+            in_range: Some(Version::new(2, 28, 1)),
+            latest: Version::new(2, 28, 1),
+            target: Some(Version::new(2, 28, 1)),
+            target_spec: Some(VersionSpec::Pinned(Version::new(2, 28, 1))),
+            severity: Some(UpdateSeverity::Patch),
+            force_spec: Some(VersionSpec::Pinned(Version::new(2, 28, 1))),
+            installed_released_at: None,
+            target_released_at: None,
+            latest_released_at: None,
+            check_failed: false,
+        };
+
+        let updater = FileUpdater::new();
+        let result = updater.apply_updates(&[check], false, false)?;
+
+        assert_eq!(result.not_applied.len(), 1, "{:?}", result.not_applied);
+        assert!(
+            result.not_applied[0].reason.contains("past the end"),
+            "{}",
+            result.not_applied[0].reason
+        );
 
         Ok(())
     }

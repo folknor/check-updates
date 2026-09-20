@@ -677,7 +677,8 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     if args.json {
         if args.update {
             let updater = FileUpdater::new();
-            let _ = updater.apply_updates(&checks, args.minor, args.force)?;
+            let result = updater.apply_updates(&checks, args.minor, args.force)?;
+            result.print_not_applied();
         }
         emit_json_project(&checks, &fetch_failures, &unchecked)?;
         return Ok(());
@@ -716,6 +717,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     if args.update {
         let updater = FileUpdater::new();
         let result = updater.apply_updates(&checks, args.minor, args.force)?;
+        result.print_not_applied();
 
         println!();
         if !result.modified_files.is_empty() {
