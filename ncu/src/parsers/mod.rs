@@ -1,5 +1,5 @@
-pub mod package_json;
 pub mod lockfiles;
+pub mod package_json;
 
-pub use package_json::PackageJsonParser;
 pub use lockfiles::LockfileParser;
+pub use package_json::PackageJsonParser;

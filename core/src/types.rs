@@ -24,6 +24,21 @@ pub struct Dependency {
     /// the manifest key already matches the upstream name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_key: Option<String>,
+    /// Manifest section this dependency was declared in, verbatim as it appears
+    /// in the source file: `"dependencies"` / `"devDependencies"` /
+    /// `"peerDependencies"` / `"optionalDependencies"` for package.json,
+    /// `"dependencies"` / `"dev-dependencies"` / `"build-dependencies"` (with a
+    /// `target.<cfg>.` prefix where applicable) for Cargo.toml, and the
+    /// requirements file or PEP 621 table for Python.
+    ///
+    /// Updaters must rewrite only the section a dependency was read from. The
+    /// same package routinely appears in several sections at deliberately
+    /// different specs (an npm `peerDependencies` range is wide on purpose);
+    /// writing the resolved spec into all of them is a semantic change nobody
+    /// asked for. `None` means "unknown", and an updater seeing `None` falls
+    /// back to the old all-sections behaviour.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
 }
 
 /// Package information from a registry (generic across ecosystems)
@@ -138,6 +153,7 @@ mod tests {
                 line_number: 1,
                 original_line: "dirs = \"6.0.0\"".to_string(),
                 manifest_key: None,
+                section: Some("dependencies".to_string()),
             },
             installed: Some(Version::new(6, 0, 0)),
             in_range: None,

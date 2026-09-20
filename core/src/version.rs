@@ -40,10 +40,10 @@ impl<'de> Deserialize<'de> for Version {
 
 impl PartialEq for Version {
     fn eq(&self, other: &Self) -> bool {
-        self.major == other.major
-            && self.minor == other.minor
-            && self.patch == other.patch
-            && self.pre_release == other.pre_release
+        // Defined in terms of `Ord` so that equality and ordering can never
+        // disagree about two pre-release strings that normalize to the same
+        // identifier sequence (`1.2.3-rc1` and `1.2.3rc1`).
+        self.cmp(other) == Ordering::Equal
     }
 }
 
@@ -90,20 +90,34 @@ impl FromStr for Version {
             (s, None)
         };
 
-        // Handle pre-release separators (-, a, b, rc, alpha, beta, dev, post)
-        let (base_part, pre_release) = parse_prerelease(version_part);
+        // Split the numeric release core from whatever follows it. The release
+        // core is the longest leading `\d+(\.\d+)*`; the remainder must be a
+        // recognizable pre-release suffix or the whole string is rejected.
+        let (base_part, suffix) = split_release(version_part);
+        if base_part.is_empty() {
+            return Err(VersionError::InvalidVersion(s.to_string()));
+        }
+        let pre_release =
+            parse_prerelease(suffix).ok_or_else(|| VersionError::InvalidVersion(s.to_string()))?;
 
-        // Parse the base version (major.minor.patch)
-        let parts: Vec<&str> = base_part.split('.').collect();
+        // Parse the base version (major.minor.patch). Every segment here is a
+        // digit run by construction, so a parse failure means numeric overflow
+        // and is an error - never a silent `0`.
+        let mut parts = base_part.split('.');
 
-        let major = parts
-            .first()
-            .and_then(|s| s.parse().ok())
-            .ok_or_else(|| VersionError::InvalidVersion(s.to_string()))?;
+        let mut next_segment = |required: bool| -> Result<u64, VersionError> {
+            match parts.next() {
+                Some(seg) => seg
+                    .parse()
+                    .map_err(|_| VersionError::InvalidVersion(s.to_string())),
+                None if required => Err(VersionError::InvalidVersion(s.to_string())),
+                None => Ok(0),
+            }
+        };
 
-        let minor = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-
-        let patch = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let major = next_segment(true)?;
+        let minor = next_segment(false)?;
+        let patch = next_segment(false)?;
 
         Ok(Version {
             major,
@@ -116,20 +130,198 @@ impl FromStr for Version {
     }
 }
 
-fn parse_prerelease(s: &str) -> (&str, Option<String>) {
-    // Common pre-release patterns
-    let patterns = [
-        "dev", "post", "alpha", "beta", "rc", "a", "b", "c", "-",
-    ];
+/// Split off the leading numeric release core, `\d+(\.\d+)*`.
+///
+/// Returns `(release, remainder)`. A `.` is only consumed when it is followed
+/// by a digit, so `1.0.0.post1` yields `("1.0.0", ".post1")` and `1.x` yields
+/// `("1", ".x")`. All scanning is on bytes of the original string - no
+/// lowercased copy is produced, so no byte index taken from one string is ever
+/// used to slice another.
+fn split_release(s: &str) -> (&str, &str) {
+    let bytes = s.as_bytes();
+    let mut end = 0;
+    let mut i = 0;
 
-    for pattern in patterns {
-        if let Some(idx) = s.to_lowercase().find(pattern)
-            && idx > 0 {
-                return (&s[..idx], Some(s[idx..].to_string()));
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
             }
+            end = i;
+            // Continue only across a dot that introduces another digit run.
+            if i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1].is_ascii_digit() {
+                i += 1;
+                continue;
+            }
+            break;
+        }
+        break;
     }
 
-    (s, None)
+    (&s[..end], &s[end..])
+}
+
+/// Pre-release / post-release markers recognized after the numeric core.
+///
+/// This is the PEP 440 set plus the spellings seen in the wild. Anything else
+/// that is not introduced by a semver `-` is rejected rather than being
+/// absorbed as junk.
+const PRE_RELEASE_MARKERS: [&str; 12] = [
+    "dev", "post", "alpha", "beta", "preview", "pre", "rev", "rc", "a", "b", "c", "r",
+];
+
+fn is_identifier_body(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
+}
+
+/// Classify the remainder left by [`split_release`].
+///
+/// `None` means "this is not a version at all" - the caller turns it into a
+/// parse error. `Some(None)` means there is no pre-release part.
+///
+/// The returned string is normalized: the introducing separator (`-`, `.` or
+/// `_`) is stripped, so `1.2.3-rc1` and `1.2.3rc1` both yield `"rc1"` and the
+/// comparison in [`compare_prerelease`] sees one consistent form.
+fn parse_prerelease(suffix: &str) -> Option<Option<String>> {
+    if suffix.is_empty() {
+        return Some(None);
+    }
+
+    // Semver: everything after the first `-` is the pre-release, whatever it
+    // spells (`1.2.3-1`, `1.2.3-pre`, `1.2.3-alpha.1`).
+    if let Some(rest) = suffix.strip_prefix('-') {
+        return if is_identifier_body(rest) {
+            Some(Some(rest.to_string()))
+        } else {
+            None
+        };
+    }
+
+    // PEP 440 and the compact semver-adjacent forms: an optional `.`/`_`
+    // separator followed by a known marker word.
+    let rest = suffix
+        .strip_prefix('.')
+        .or_else(|| suffix.strip_prefix('_'))
+        .unwrap_or(suffix);
+
+    if !is_identifier_body(rest) {
+        return None;
+    }
+
+    let word_len = rest.bytes().take_while(u8::is_ascii_alphabetic).count();
+    if word_len == 0 {
+        return None;
+    }
+    let word = &rest[..word_len];
+    if PRE_RELEASE_MARKERS
+        .iter()
+        .any(|m| m.eq_ignore_ascii_case(word))
+    {
+        Some(Some(rest.to_string()))
+    } else {
+        None
+    }
+}
+
+/// Rank of a known alphabetic marker, lowest first.
+///
+/// Semver alone would compare identifiers lexically, which puts `dev` above
+/// `beta` and `alpha` - the wrong order for every ecosystem that uses these
+/// words. Unknown words fall back to lexical comparison among themselves and
+/// sort above all known markers.
+fn marker_rank(word: &str) -> Option<u8> {
+    let rank = match word.to_ascii_lowercase().as_str() {
+        "dev" => 0,
+        "alpha" | "a" => 1,
+        "beta" | "b" => 2,
+        "pre" | "preview" | "c" => 3,
+        "rc" => 4,
+        "post" | "rev" | "r" => 5,
+        _ => return None,
+    };
+    Some(rank)
+}
+
+/// One comparable unit of a pre-release string.
+#[derive(PartialEq, Eq)]
+enum PreSegment<'a> {
+    Numeric(u64),
+    Alpha(&'a str),
+}
+
+/// Split a pre-release string into comparable segments.
+///
+/// Separators (`.`, `-`, `_`) delimit segments, and a letter/digit transition
+/// inside a segment also splits, so `rc1` tokenizes exactly like `rc.1`.
+fn prerelease_segments(s: &str) -> Vec<PreSegment<'_>> {
+    let mut out = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'.' || b == b'-' || b == b'_' {
+            i += 1;
+        } else if b.is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            // An overflowing numeric identifier degrades to an alpha segment
+            // rather than panicking or silently becoming 0.
+            match s[start..i].parse::<u64>() {
+                Ok(n) => out.push(PreSegment::Numeric(n)),
+                Err(_) => out.push(PreSegment::Alpha(&s[start..i])),
+            }
+        } else {
+            let start = i;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if c == b'.' || c == b'-' || c == b'_' || c.is_ascii_digit() {
+                    break;
+                }
+                i += 1;
+            }
+            out.push(PreSegment::Alpha(&s[start..i]));
+        }
+    }
+
+    out
+}
+
+/// Compare two pre-release strings by identifier, not by raw string.
+///
+/// Numeric identifiers compare numerically and rank below alphabetic ones
+/// (semver rule 11); alphabetic identifiers compare by [`marker_rank`] first so
+/// `alpha < beta < rc`. A shorter identifier list is smaller when it is a
+/// prefix of the longer one, so `rc < rc.1`.
+fn compare_prerelease(a: &str, b: &str) -> Ordering {
+    let left = prerelease_segments(a);
+    let right = prerelease_segments(b);
+
+    for (l, r) in left.iter().zip(right.iter()) {
+        let ord = match (l, r) {
+            (PreSegment::Numeric(x), PreSegment::Numeric(y)) => x.cmp(y),
+            (PreSegment::Numeric(_), PreSegment::Alpha(_)) => Ordering::Less,
+            (PreSegment::Alpha(_), PreSegment::Numeric(_)) => Ordering::Greater,
+            (PreSegment::Alpha(x), PreSegment::Alpha(y)) => {
+                match (marker_rank(x), marker_rank(y)) {
+                    (Some(rx), Some(ry)) => rx.cmp(&ry),
+                    // A known marker is always "earlier" than an unknown word.
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => x.to_ascii_lowercase().cmp(&y.to_ascii_lowercase()),
+                }
+            }
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+
+    left.len().cmp(&right.len())
 }
 
 impl Ord for Version {
@@ -151,7 +343,7 @@ impl Ord for Version {
         match (&self.pre_release, &other.pre_release) {
             (None, Some(_)) => Ordering::Greater,
             (Some(_), None) => Ordering::Less,
-            (Some(a), Some(b)) => a.cmp(b),
+            (Some(a), Some(b)) => compare_prerelease(a, b),
             (None, None) => Ordering::Equal,
         }
     }
@@ -246,10 +438,9 @@ impl VersionSpec {
                 let min_part = parts[0].trim();
                 let max_part = parts[1].trim();
 
-                if let (Some(min_str), Some(max_str)) = (
-                    min_part.strip_prefix(">="),
-                    max_part.strip_prefix('<'),
-                ) {
+                if let (Some(min_str), Some(max_str)) =
+                    (min_part.strip_prefix(">="), max_part.strip_prefix('<'))
+                {
                     let min = Version::from_str(min_str)?;
                     let max = Version::from_str(max_str)?;
                     return Ok(VersionSpec::Range { min, max });
@@ -340,8 +531,7 @@ impl VersionSpec {
             }
             VersionSpec::Wildcard { prefix, .. } => {
                 // Must match prefix followed by a dot (or end), so 1.2.* doesn't match 1.20.x
-                version.original.starts_with(&format!("{prefix}."))
-                    || version.original == *prefix
+                version.original.starts_with(&format!("{prefix}.")) || version.original == *prefix
             }
             VersionSpec::NotEqual(v) => version != v,
             VersionSpec::Complex(_) => false, // Can't evaluate complex constraints; don't claim in-range
@@ -365,28 +555,18 @@ impl VersionSpec {
         }
     }
 
-    /// Get the maximum allowed major version (for "in range" calculation)
-    pub fn max_major(&self) -> Option<u64> {
-        match self {
-            VersionSpec::Range { max, .. } => Some(max.major),
-            VersionSpec::Caret(v) => Some(v.major),
-            VersionSpec::LessThan(v) | VersionSpec::Maximum(v) => Some(v.major),
-            // For unbounded specs, we assume same major (semver)
-            VersionSpec::Minimum(v)
-            | VersionSpec::GreaterThan(v)
-            | VersionSpec::Pinned(v)
-            | VersionSpec::Compatible(v)
-            | VersionSpec::Tilde(v) => Some(v.major),
-            VersionSpec::NotEqual(v) => Some(v.major),
-            VersionSpec::Wildcard { prefix, .. } => {
-                prefix.split('.').next().and_then(|s| s.parse().ok())
-            }
-            VersionSpec::Complex(_) | VersionSpec::Any => None,
-        }
-    }
+    // `max_major()` was removed because it mixed an exclusive bound for
+    // `Range`/`LessThan` with an inclusive one for `Caret`/`Minimum` under a
+    // single name and had no caller in or outside this crate. Reintroduce it
+    // only with the inclusivity of the bound stated in the name.
 
     /// Get the version string without operators (for Cargo.toml format)
-    /// Returns just "1.0.0" instead of "==1.0.0"
+    ///
+    /// Returns just `"1.0.0"` instead of `"==1.0.0"`. Variants that have no
+    /// bare-version rendering return `None`: `Any`, and `Complex`, whose raw
+    /// string still carries its operators. `Wildcard` is the one
+    /// deliberate exception - it renders as `"1.2.*"`, since the wildcard is
+    /// part of the version, not an operator prefix.
     pub fn version_string(&self) -> Option<String> {
         match self {
             VersionSpec::Pinned(v)
@@ -400,8 +580,7 @@ impl VersionSpec {
             | VersionSpec::NotEqual(v) => Some(v.to_string()),
             VersionSpec::Range { min, .. } => Some(min.to_string()),
             VersionSpec::Wildcard { prefix, .. } => Some(format!("{prefix}.*")),
-            VersionSpec::Complex(s) => Some(s.clone()),
-            VersionSpec::Any => None,
+            VersionSpec::Complex(_) | VersionSpec::Any => None,
         }
     }
 
@@ -548,6 +727,169 @@ mod tests {
             VersionSpec::parse(">=1.0.0,<2.0.0").unwrap(),
             VersionSpec::Range { .. }
         ));
+    }
+
+    // The patch number of a named pre-release must survive parsing: an earlier
+    // parser dropped it and read `1.2.3-rc1` as `1.2.0`.
+    #[test]
+    fn named_prerelease_keeps_its_patch_number() {
+        for s in [
+            "1.2.3-rc1",
+            "1.2.3-beta2",
+            "1.2.3-alpha.1",
+            "1.2.3-dev",
+            "1.2.3rc1",
+            "1.2.3-a1",
+            "1.2.3-pre",
+        ] {
+            let v = Version::from_str(s).unwrap();
+            assert_eq!((v.major, v.minor, v.patch), (1, 2, 3), "parsing {s}");
+            assert!(v.is_prerelease(), "{s} should be flagged pre-release");
+        }
+
+        // A PEP 440 post-release keeps its patch number too. Whether it is a
+        // *pre*-release is a separate, still-open question - it is not, and
+        // sorts above the bare release - so only the numbers are pinned here.
+        let v = Version::from_str("1.2.3.post1").unwrap();
+        assert_eq!((v.major, v.minor, v.patch), (1, 2, 3));
+
+        assert_ne!(
+            Version::from_str("1.2.3-rc1").unwrap(),
+            Version::from_str("1.2.0-rc1").unwrap()
+        );
+    }
+
+    #[test]
+    fn prerelease_separator_is_normalized_away() {
+        assert_eq!(
+            Version::from_str("1.2.3-rc1").unwrap().pre_release,
+            Some("rc1".to_string())
+        );
+        assert_eq!(
+            Version::from_str("1.2.3rc1").unwrap().pre_release,
+            Some("rc1".to_string())
+        );
+        assert_eq!(
+            Version::from_str("1.2.3-1").unwrap().pre_release,
+            Some("1".to_string())
+        );
+    }
+
+    // Pre-release ordering is by identifier, not by raw string: `beta.10` must
+    // sort above `beta.2`, which lexicographic comparison gets backwards.
+    #[test]
+    fn prerelease_ordering_is_semantic() {
+        let lt = |a: &str, b: &str| {
+            let va = Version::from_str(a).unwrap();
+            let vb = Version::from_str(b).unwrap();
+            assert!(va < vb, "expected {a} < {b}");
+        };
+
+        lt("1.0.0-beta.2", "1.0.0-beta.10");
+        lt("1.0.0-rc.2", "1.0.0-rc.10");
+        lt("1.0.0-alpha9", "1.0.0-alpha10");
+        lt("1.0.0-dev", "1.0.0-alpha1");
+        lt("1.0.0-alpha1", "1.0.0-beta1");
+        lt("1.0.0-beta1", "1.0.0-rc1");
+        lt("1.0.0-rc1", "1.0.0");
+        lt("1.0.0-rc", "1.0.0-rc.1");
+        lt("1.0.0-1", "1.0.0-alpha");
+    }
+
+    #[test]
+    fn max_picks_the_highest_prerelease() {
+        let mut versions = ["1.0.0-rc.2", "1.0.0-rc.10", "1.0.0-beta.3"]
+            .iter()
+            .map(|s| Version::from_str(s).unwrap())
+            .collect::<Vec<_>>();
+        versions.sort();
+        assert_eq!(versions.last().unwrap().original, "1.0.0-rc.10");
+    }
+
+    // A malformed numeric segment is a parse error, never a silently
+    // substituted zero - `1.x` must not read as `1.0.0`.
+    #[test]
+    fn malformed_versions_are_rejected() {
+        for s in [
+            "1.x",
+            "1.2.x",
+            "1.2.3 - 2.3.4",
+            "x",
+            "",
+            "latest",
+            "1.2.3-",
+            "^1.2.3",
+        ] {
+            assert!(
+                Version::from_str(s).is_err(),
+                "{s:?} should not parse as a version"
+            );
+        }
+    }
+
+    #[test]
+    fn wildcard_spec_does_not_degrade_to_a_pin() {
+        assert!(matches!(
+            VersionSpec::parse("1.x").unwrap(),
+            VersionSpec::Complex(_)
+        ));
+        assert!(matches!(
+            VersionSpec::parse("1.2.3 - 2.3.4").unwrap(),
+            VersionSpec::Complex(_)
+        ));
+    }
+
+    #[test]
+    fn missing_components_still_default_to_zero() {
+        let v = Version::from_str("2").unwrap();
+        assert_eq!((v.major, v.minor, v.patch), (2, 0, 0));
+        let v = Version::from_str("2.7").unwrap();
+        assert_eq!((v.major, v.minor, v.patch), (2, 7, 0));
+    }
+
+    // No byte index taken from a lowercased copy is ever used to slice the
+    // original: for non-ASCII input the two differ in length and slicing panics.
+    #[test]
+    fn non_ascii_version_strings_do_not_panic() {
+        for s in ["1.2.3-RC1", "1.2.3-ÄLPHA", "İ1.2.3", "1.2.3İ", "1.2.3-ßeta"] {
+            let _ = Version::from_str(s);
+        }
+        assert_eq!(
+            Version::from_str("1.2.3-RC1").unwrap().pre_release,
+            Some("RC1".to_string())
+        );
+        assert_eq!(
+            Version::from_str("1.2.3-RC1").unwrap(),
+            Version::from_str("1.2.3-rc1").unwrap()
+        );
+    }
+
+    #[test]
+    fn local_segment_is_split_off() {
+        let v = Version::from_str("1.2.3+cu118").unwrap();
+        assert_eq!((v.major, v.minor, v.patch), (1, 2, 3));
+        assert_eq!(v.local, Some("cu118".to_string()));
+        assert!(!v.is_prerelease());
+    }
+
+    // `version_string` renders a bare version and never leaks the operator,
+    // since callers write the result straight into a manifest.
+    #[test]
+    fn version_string_has_no_operators() {
+        for s in ["==1.2.3", ">=1.2.3", "^1.2.3", "~1.2.3", "!=1.2.3"] {
+            let rendered = VersionSpec::parse(s)
+                .unwrap()
+                .version_string()
+                .expect("bare version");
+            assert_eq!(rendered, "1.2.3", "for spec {s}");
+        }
+        assert_eq!(
+            VersionSpec::parse(">1.0,<2.0,!=1.5")
+                .unwrap()
+                .version_string(),
+            None
+        );
+        assert_eq!(VersionSpec::parse("*").unwrap().version_string(), None);
     }
 
     #[test]

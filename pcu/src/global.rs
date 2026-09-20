@@ -1,5 +1,5 @@
-use check_updates_core::{UpdateSeverity, Version};
 use anyhow::Result;
+use check_updates_core::{UpdateSeverity, Version};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -159,14 +159,15 @@ impl GlobalPackageDiscovery {
                 if let Some(version_str) = venv_data
                     .pointer("/metadata/main_package/package_version")
                     .and_then(|v| v.as_str())
-                    && let Ok(version) = Version::from_str(version_str) {
-                        packages.push(GlobalPackage {
-                            name: name.clone(),
-                            installed_version: version,
-                            source: GlobalSource::Pipx,
-                            python_version: None,
-                        });
-                    }
+                    && let Ok(version) = Version::from_str(version_str)
+                {
+                    packages.push(GlobalPackage {
+                        name: name.clone(),
+                        installed_version: version,
+                        source: GlobalSource::Pipx,
+                        python_version: None,
+                    });
+                }
             }
         }
 
@@ -237,9 +238,10 @@ impl GlobalPackageDiscovery {
                     .replace('-', "_");
                 // Check if this dist-info matches our package
                 if dist_name.starts_with(&normalized_name)
-                    && let Some((_, version)) = self.parse_dist_info_name(&name) {
-                        return Some(version);
-                    }
+                    && let Some((_, version)) = self.parse_dist_info_name(&name)
+                {
+                    return Some(version);
+                }
             }
         }
 
@@ -645,20 +647,27 @@ ty v0.0.5
         assert!(commands.len() >= 3);
 
         // Check for uv command
-        let has_uv = commands.iter().any(|c| matches!(c, UpgradeCommand::Command(s) if s == "uv tool upgrade --all"));
+        let has_uv = commands
+            .iter()
+            .any(|c| matches!(c, UpgradeCommand::Command(s) if s == "uv tool upgrade --all"));
         assert!(has_uv, "Should have uv upgrade command");
 
         // Check for pipx command
-        let has_pipx = commands.iter().any(|c| matches!(c, UpgradeCommand::Command(s) if s == "pipx upgrade-all"));
+        let has_pipx = commands
+            .iter()
+            .any(|c| matches!(c, UpgradeCommand::Command(s) if s == "pipx upgrade-all"));
         assert!(has_pipx, "Should have pipx upgrade command");
 
         // Check for pip command or comment for Python 3.11
-        let has_pip_311 = commands.iter().any(|c| {
-            match c {
-                UpgradeCommand::Command(s) => s.contains("python3.11") && s.contains("requests") && s.contains("flask"),
-                UpgradeCommand::Comment(s) => s.contains("3.11"),
+        let has_pip_311 = commands.iter().any(|c| match c {
+            UpgradeCommand::Command(s) => {
+                s.contains("python3.11") && s.contains("requests") && s.contains("flask")
             }
+            UpgradeCommand::Comment(s) => s.contains("3.11"),
         });
-        assert!(has_pip_311, "Should have pip command or comment for Python 3.11");
+        assert!(
+            has_pip_311,
+            "Should have pip command or comment for Python 3.11"
+        );
     }
 }

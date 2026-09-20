@@ -13,7 +13,9 @@ fn test_help_flag() {
     cmd.arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Check for outdated Python dependencies"))
+        .stdout(predicate::str::contains(
+            "Check for outdated Python dependencies",
+        ))
         .stdout(predicate::str::contains("--update"))
         .stdout(predicate::str::contains("--minor"))
         .stdout(predicate::str::contains("--force"))
@@ -27,7 +29,9 @@ fn test_help_short_flag() {
     cmd.arg("-h")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Check for outdated Python dependencies"));
+        .stdout(predicate::str::contains(
+            "Check for outdated Python dependencies",
+        ));
 }
 
 /// Test that --version flag works
@@ -56,9 +60,7 @@ fn test_detect_requirements_txt() {
     let project = common::create_temp_project_with_requirements();
 
     let mut cmd = Command::cargo_bin("pcu").unwrap();
-    cmd.arg(project.path())
-        .assert()
-        .success();
+    cmd.arg(project.path()).assert().success();
 
     // Just verify it runs without error for now
     // Later we'll add mocking to verify output
@@ -70,9 +72,7 @@ fn test_detect_pep621_pyproject() {
     let project = common::create_temp_project_with_pep621();
 
     let mut cmd = Command::cargo_bin("pcu").unwrap();
-    cmd.arg(project.path())
-        .assert()
-        .success();
+    cmd.arg(project.path()).assert().success();
 }
 
 /// Test running on a project with Poetry pyproject.toml
@@ -81,9 +81,7 @@ fn test_detect_poetry_pyproject() {
     let project = common::create_temp_project_with_poetry();
 
     let mut cmd = Command::cargo_bin("pcu").unwrap();
-    cmd.arg(project.path())
-        .assert()
-        .success();
+    cmd.arg(project.path()).assert().success();
 }
 
 /// Test running on a project with PDM pyproject.toml
@@ -92,9 +90,7 @@ fn test_detect_pdm_pyproject() {
     let project = common::create_temp_project_with_pdm();
 
     let mut cmd = Command::cargo_bin("pcu").unwrap();
-    cmd.arg(project.path())
-        .assert()
-        .success();
+    cmd.arg(project.path()).assert().success();
 }
 
 /// Test running on a project with conda environment.yml
@@ -103,9 +99,7 @@ fn test_detect_conda_environment() {
     let project = common::create_temp_project_with_conda();
 
     let mut cmd = Command::cargo_bin("pcu").unwrap();
-    cmd.arg(project.path())
-        .assert()
-        .success();
+    cmd.arg(project.path()).assert().success();
 }
 
 /// Test running on a project with multiple dependency files
@@ -114,9 +108,7 @@ fn test_detect_multiple_files() {
     let project = common::create_temp_project_with_multiple_files();
 
     let mut cmd = Command::cargo_bin("pcu").unwrap();
-    cmd.arg(project.path())
-        .assert()
-        .success();
+    cmd.arg(project.path()).assert().success();
 }
 
 /// Test running on an empty project (no dependency files)
@@ -135,10 +127,7 @@ fn test_update_flag() {
     let project = common::create_temp_project_with_requirements();
 
     let mut cmd = Command::cargo_bin("pcu").unwrap();
-    cmd.arg(project.path())
-        .arg("--update")
-        .assert()
-        .success();
+    cmd.arg(project.path()).arg("--update").assert().success();
 }
 
 /// Test running with --minor flag
@@ -147,10 +136,7 @@ fn test_minor_flag() {
     let project = common::create_temp_project_with_requirements();
 
     let mut cmd = Command::cargo_bin("pcu").unwrap();
-    cmd.arg(project.path())
-        .arg("--minor")
-        .assert()
-        .success();
+    cmd.arg(project.path()).arg("--minor").assert().success();
 }
 
 /// Test running with --force flag
@@ -159,10 +145,7 @@ fn test_force_flag() {
     let project = common::create_temp_project_with_requirements();
 
     let mut cmd = Command::cargo_bin("pcu").unwrap();
-    cmd.arg(project.path())
-        .arg("--force")
-        .assert()
-        .success();
+    cmd.arg(project.path()).arg("--force").assert().success();
 }
 
 /// Test running with --pre-release flag
@@ -211,9 +194,7 @@ fn test_no_modification_without_update() {
 #[test]
 fn test_nonexistent_directory() {
     let mut cmd = Command::cargo_bin("pcu").unwrap();
-    cmd.arg("/nonexistent/path/to/project")
-        .assert()
-        .failure();
+    cmd.arg("/nonexistent/path/to/project").assert().failure();
 }
 
 /// Test that current directory is used when no path is provided
@@ -222,9 +203,7 @@ fn test_default_to_current_directory() {
     let project = common::create_temp_project_with_requirements();
 
     let mut cmd = Command::cargo_bin("pcu").unwrap();
-    cmd.current_dir(project.path())
-        .assert()
-        .success();
+    cmd.current_dir(project.path()).assert().success();
 }
 
 /// `--json` on an empty project emits a valid JSON envelope.
@@ -239,7 +218,10 @@ fn test_json_empty_project_envelope() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "pcu --json should succeed on empty project");
+    assert!(
+        output.status.success(),
+        "pcu --json should succeed on empty project"
+    );
 
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");

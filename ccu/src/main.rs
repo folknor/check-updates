@@ -4,19 +4,22 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ccu::cli::Args;
 use ccu::cratesio::CratesIoClient;
 use ccu::detector::ProjectDetector;
 use ccu::global::{
-    check_git_updates, check_path_updates, generate_upgrade_commands, GlobalCheck,
-    GlobalPackageDiscovery, GlobalSource,
+    GlobalCheck, GlobalPackageDiscovery, GlobalSource, check_git_updates, check_path_updates,
+    generate_upgrade_commands,
 };
 use ccu::output::GlobalTableRenderer;
 use ccu::parsers::{CargoLockParser, CargoTomlParser, DependencyParser};
 use ccu::updater::FileUpdater;
-use check_updates_core::{DependencyCheck, DependencyResolver, TableRenderer, UpdateSeverity, Version};
+use check_updates_core::{
+    DependencyCheck, DependencyResolver, TableRenderer, UpdateSeverity, Version,
+};
 
 const SCHEMA_VERSION: u32 = 1;
 const TOOL_NAME: &str = "ccu";
@@ -30,7 +33,10 @@ struct GlobalCheckJson<'a> {
 }
 
 fn errors_to_json(errors: &[String]) -> Vec<serde_json::Value> {
-    errors.iter().map(|e| serde_json::json!({"message": e})).collect()
+    errors
+        .iter()
+        .map(|e| serde_json::json!({"message": e}))
+        .collect()
 }
 
 fn emit_json_project(checks: &[DependencyCheck], errors: &[String]) -> Result<()> {
@@ -48,7 +54,10 @@ fn emit_json_project(checks: &[DependencyCheck], errors: &[String]) -> Result<()
 fn emit_json_global(checks: &[GlobalCheck], errors: &[String]) -> Result<()> {
     let with_severity: Vec<GlobalCheckJson<'_>> = checks
         .iter()
-        .map(|c| GlobalCheckJson { inner: c, severity: c.update_severity() })
+        .map(|c| GlobalCheckJson {
+            inner: c,
+            severity: c.update_severity(),
+        })
         .collect();
     let report = serde_json::json!({
         "schema_version": SCHEMA_VERSION,
@@ -97,11 +106,12 @@ async fn run_global_mode(args: &Args) -> Result<()> {
         .filter(|p| p.source == GlobalSource::Registry)
         .map(|p| p.name.clone())
         .collect();
-    let git_count = packages.iter().filter(|p| p.source == GlobalSource::Git).count();
+    let git_count = packages
+        .iter()
+        .filter(|p| p.source == GlobalSource::Git)
+        .count();
 
     // 2. Check path repos (local git fetch), query crates.io, and check git repos concurrently
-    let path_statuses = check_path_updates(&packages);
-
     let cratesio_client = CratesIoClient::new(args.pre_release);
 
     let progress_bar = ProgressBar::new((registry_names.len() + git_count) as u64);
@@ -114,20 +124,35 @@ async fn run_global_mode(args: &Args) -> Result<()> {
             .progress_chars("#>-"),
     );
 
+    // The bar spans both producers (registry lookups plus git remote checks), so
+    // each reports its own completed count into a shared pair of counters and the
+    // position is their sum. Both callbacks receive an absolute count, not a delta.
+    let registry_done = Arc::new(AtomicUsize::new(0));
+    let git_done = Arc::new(AtomicUsize::new(0));
+
     let progress_bar_clone = Arc::new(Mutex::new(progress_bar.clone()));
     let pb_for_registry = Arc::clone(&progress_bar_clone);
+    let pb_for_git = Arc::clone(&progress_bar_clone);
+    let registry_done_reg = Arc::clone(&registry_done);
+    let git_done_reg = Arc::clone(&git_done);
+    let registry_done_git = Arc::clone(&registry_done);
+    let git_done_git = Arc::clone(&git_done);
 
-    let (cratesio_result, git_statuses) = tokio::join!(
+    let (path_statuses, cratesio_result, git_statuses) = tokio::join!(
+        check_path_updates(&packages),
         cratesio_client.get_packages(&registry_names, move |current, _total| {
+            registry_done_reg.store(current, Ordering::Relaxed);
+            let total =
+                current + git_done_reg.load(Ordering::Relaxed);
             let pb = pb_for_registry.lock().expect("lock poisoned");
-            pb.set_position(current as u64);
+            pb.set_position(total as u64);
         }),
-        async {
-            let result = check_git_updates(&packages).await;
-            let pb = progress_bar_clone.lock().expect("lock poisoned");
-            pb.set_position(pb.length().unwrap_or(0));
-            result
-        }
+        check_git_updates(&packages, move |current| {
+            git_done_git.store(current, Ordering::Relaxed);
+            let total = current + registry_done_git.load(Ordering::Relaxed);
+            let pb = pb_for_git.lock().expect("lock poisoned");
+            pb.set_position(total as u64);
+        })
     );
 
     progress_bar.finish_and_clear();
@@ -151,6 +176,8 @@ async fn run_global_mode(args: &Args) -> Result<()> {
                         commits_behind: None,
                         has_dirty_changes: false,
                         has_update,
+                        // crates.io answered for this name, so the comparison is real.
+                        check_failed: false,
                     });
                 }
             }
@@ -164,8 +191,11 @@ async fn run_global_mode(args: &Args) -> Result<()> {
                         commits_behind: Some(status.commits_behind),
                         has_dirty_changes: false,
                         has_update,
+                        check_failed: status.unknown,
                     });
                 } else {
+                    // No entry at all means the check never ran (missing url or
+                    // hash). Report "unknown", never "up to date".
                     checks.push(GlobalCheck {
                         package: pkg.clone(),
                         latest_version: None,
@@ -173,6 +203,7 @@ async fn run_global_mode(args: &Args) -> Result<()> {
                         commits_behind: None,
                         has_dirty_changes: false,
                         has_update: false,
+                        check_failed: true,
                     });
                 }
             }
@@ -186,8 +217,10 @@ async fn run_global_mode(args: &Args) -> Result<()> {
                         commits_behind: Some(status.commits_behind),
                         has_dirty_changes: status.has_dirty_changes,
                         has_update,
+                        check_failed: status.unknown,
                     });
                 } else {
+                    // The local repo was never interrogated, so we know nothing.
                     checks.push(GlobalCheck {
                         package: pkg.clone(),
                         latest_version: None,
@@ -195,6 +228,7 @@ async fn run_global_mode(args: &Args) -> Result<()> {
                         commits_behind: None,
                         has_dirty_changes: false,
                         has_update: false,
+                        check_failed: true,
                     });
                 }
             }
@@ -328,19 +362,21 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     for dependency in &all_dependencies {
         if let Some(package_info) = package_infos.get(&dependency.name) {
-            let installed = installed_versions.get(&dependency.name).and_then(|versions| {
-                // When multiple versions exist in Cargo.lock (e.g. direct + transitive),
-                // pick the highest version that satisfies the declared spec
-                let mut matching: Vec<&Version> = versions
-                    .iter()
-                    .filter(|v| dependency.version_spec.satisfies(v))
-                    .collect();
-                matching.sort();
-                matching.last().copied().or_else(|| {
-                    // Fallback: highest overall (shouldn't happen in practice)
-                    versions.iter().max()
-                })
-            });
+            let installed = installed_versions
+                .get(&dependency.name)
+                .and_then(|versions| {
+                    // When multiple versions exist in Cargo.lock (e.g. direct + transitive),
+                    // pick the highest version that satisfies the declared spec
+                    let mut matching: Vec<&Version> = versions
+                        .iter()
+                        .filter(|v| dependency.version_spec.satisfies(v))
+                        .collect();
+                    matching.sort();
+                    matching.last().copied().or_else(|| {
+                        // Fallback: highest overall (shouldn't happen in practice)
+                        versions.iter().max()
+                    })
+                });
             let check = resolver.resolve(dependency, package_info, installed);
             checks.push(check);
         }
@@ -362,7 +398,10 @@ async fn run_project_mode(args: &Args) -> Result<()> {
             let key = format!(
                 "{}:{}",
                 c.dependency.name,
-                c.target.as_ref().map(std::string::ToString::to_string).unwrap_or_default()
+                c.target
+                    .as_ref()
+                    .map(std::string::ToString::to_string)
+                    .unwrap_or_default()
             );
             seen.insert(key)
         })

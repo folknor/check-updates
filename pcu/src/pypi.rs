@@ -1,5 +1,5 @@
+use anyhow::{Context, Result, anyhow};
 use check_updates_core::{PackageInfo, Version};
-use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -147,10 +147,7 @@ impl PyPiClient {
         };
 
         // Get latest stable version (always filter out prereleases)
-        let latest_stable = all_versions
-            .iter()
-            .rfind(|v| !v.is_prerelease())
-            .cloned();
+        let latest_stable = all_versions.iter().rfind(|v| !v.is_prerelease()).cloned();
 
         Ok(PackageInfo {
             name: pypi_data.info.name,
@@ -266,7 +263,11 @@ mod tests {
         let client = PyPiClient::new(false);
         let result = client.get_package("requests").await;
 
-        assert!(result.is_ok(), "Failed to fetch requests package: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to fetch requests package: {:?}",
+            result.err()
+        );
 
         let package_info = result.unwrap();
         assert_eq!(package_info.name.to_lowercase(), "requests");
@@ -277,7 +278,9 @@ mod tests {
     #[tokio::test]
     async fn test_get_package_not_found() {
         let client = PyPiClient::new(false);
-        let result = client.get_package("this-package-definitely-does-not-exist-12345").await;
+        let result = client
+            .get_package("this-package-definitely-does-not-exist-12345")
+            .await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
@@ -286,20 +289,23 @@ mod tests {
     #[tokio::test]
     async fn test_get_packages_concurrent() {
         let client = PyPiClient::new(false);
-        let packages = vec![
-            "requests".to_string(),
-            "flask".to_string(),
-        ];
+        let packages = vec!["requests".to_string(), "flask".to_string()];
 
         // Use Arc<AtomicUsize> for thread-safe counter
         let progress_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let progress_calls_clone = Arc::clone(&progress_calls);
 
-        let result = client.get_packages(&packages, move |_current, _total| {
-            progress_calls_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }).await;
+        let result = client
+            .get_packages(&packages, move |_current, _total| {
+                progress_calls_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .await;
 
-        assert!(result.is_ok(), "Failed to fetch packages: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to fetch packages: {:?}",
+            result.err()
+        );
 
         let results = result.unwrap();
         assert!(!results.packages.is_empty());
@@ -311,8 +317,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_custom_index_url() {
-        let client = PyPiClient::new(false)
-            .with_index_url("https://pypi.org/pypi/");
+        let client = PyPiClient::new(false).with_index_url("https://pypi.org/pypi/");
 
         assert_eq!(client.base_url, "https://pypi.org/pypi");
     }

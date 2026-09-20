@@ -1,6 +1,6 @@
 use super::{Dependency, DependencyParser};
-use check_updates_core::VersionSpec;
 use anyhow::{Context, Result};
+use check_updates_core::VersionSpec;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -43,8 +43,8 @@ impl CargoTomlParser {
         {
             for (key, value) in deps {
                 if let Some(version) = self.extract_version(value) {
-                    let package_name = Self::extract_package_rename(value)
-                        .unwrap_or_else(|| key.clone());
+                    let package_name =
+                        Self::extract_package_rename(value).unwrap_or_else(|| key.clone());
                     let manifest_key = if package_name == *key {
                         None
                     } else {
@@ -75,6 +75,7 @@ impl CargoTomlParser {
         table: &toml::map::Map<String, Value>,
         source_file: &Path,
         content: &str,
+        section: &str,
     ) -> Vec<Dependency> {
         let mut deps = Vec::new();
 
@@ -83,19 +84,18 @@ impl CargoTomlParser {
             // Resolve a `package = "..."` rename if present.
             // `name` is the upstream crate name we'll query on crates.io;
             // `key` stays as the local table key for the updater to find.
-            let (name, manifest_key) = if is_workspace_ref
-                && let Some(workspace_dep) = self.workspace_deps.get(key)
-            {
-                (
-                    workspace_dep.package_name.clone(),
-                    workspace_dep.manifest_key.clone(),
-                )
-            } else {
-                match Self::extract_package_rename(value) {
-                    Some(upstream) => (upstream, Some(key.clone())),
-                    None => (key.clone(), None),
-                }
-            };
+            let (name, manifest_key) =
+                if is_workspace_ref && let Some(workspace_dep) = self.workspace_deps.get(key) {
+                    (
+                        workspace_dep.package_name.clone(),
+                        workspace_dep.manifest_key.clone(),
+                    )
+                } else {
+                    match Self::extract_package_rename(value) {
+                        Some(upstream) => (upstream, Some(key.clone())),
+                        None => (key.clone(), None),
+                    }
+                };
 
             if let Some(version_str) = self.extract_version_or_workspace(key, value) {
                 // For workspace references resolved from root, point source_file
@@ -136,6 +136,7 @@ impl CargoTomlParser {
                         line_number,
                         original_line,
                         manifest_key,
+                        section: Some(section.to_string()),
                     });
                 }
             }
@@ -149,7 +150,10 @@ impl CargoTomlParser {
     /// the upstream name.
     fn extract_package_rename(value: &Value) -> Option<String> {
         if let Value::Table(table) = value {
-            table.get("package").and_then(Value::as_str).map(String::from)
+            table
+                .get("package")
+                .and_then(Value::as_str)
+                .map(String::from)
         } else {
             None
         }
@@ -169,8 +173,12 @@ impl CargoTomlParser {
         let s = s.trim();
 
         // If it has an operator, use standard parsing
-        if s.starts_with('^') || s.starts_with('~') || s.starts_with('>')
-            || s.starts_with('<') || s.starts_with('=') || s.contains('*')
+        if s.starts_with('^')
+            || s.starts_with('~')
+            || s.starts_with('>')
+            || s.starts_with('<')
+            || s.starts_with('=')
+            || s.contains('*')
             || s.contains(',')
         {
             return VersionSpec::parse(s).map_err(|e| anyhow::anyhow!("{e}"));
@@ -214,7 +222,10 @@ impl CargoTomlParser {
                 if table.contains_key("git") || table.contains_key("path") {
                     return None;
                 }
-                table.get("version").and_then(|v| v.as_str()).map(String::from)
+                table
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
             }
             _ => None,
         }
@@ -225,9 +236,7 @@ impl CargoTomlParser {
         for (idx, line) in content.lines().enumerate() {
             let trimmed = line.trim();
             // Match lines like: name = "version" or name = { version = "..." }
-            if trimmed.starts_with(name)
-                && (trimmed.contains('=') || trimmed.contains('{'))
-            {
+            if trimmed.starts_with(name) && (trimmed.contains('=') || trimmed.contains('{')) {
                 // Make sure it's not a substring match
                 let after_name = &trimmed[name.len()..].trim_start();
                 if after_name.starts_with('=') || after_name.starts_with('.') {
@@ -257,34 +266,54 @@ impl DependencyParser for CargoTomlParser {
 
         // Parse [dependencies]
         if let Some(deps) = parsed.get("dependencies").and_then(|v| v.as_table()) {
-            all_deps.extend(self.parse_deps_table(deps, path, &content));
+            all_deps.extend(self.parse_deps_table(deps, path, &content, "dependencies"));
         }
 
         // Parse [dev-dependencies]
         if let Some(deps) = parsed.get("dev-dependencies").and_then(|v| v.as_table()) {
-            all_deps.extend(self.parse_deps_table(deps, path, &content));
+            all_deps.extend(self.parse_deps_table(deps, path, &content, "dev-dependencies"));
         }
 
         // Parse [build-dependencies]
         if let Some(deps) = parsed.get("build-dependencies").and_then(|v| v.as_table()) {
-            all_deps.extend(self.parse_deps_table(deps, path, &content));
+            all_deps.extend(self.parse_deps_table(deps, path, &content, "build-dependencies"));
         }
 
         // Parse [workspace.dependencies]
         if let Some(workspace) = parsed.get("workspace").and_then(|v| v.as_table())
-            && let Some(deps) = workspace.get("dependencies").and_then(|v| v.as_table()) {
-                all_deps.extend(self.parse_deps_table(deps, path, &content));
-            }
+            && let Some(deps) = workspace.get("dependencies").and_then(|v| v.as_table())
+        {
+            all_deps.extend(self.parse_deps_table(
+                deps,
+                path,
+                &content,
+                "workspace.dependencies",
+            ));
+        }
 
         // Parse [target.'cfg(...)'.dependencies]
         if let Some(target) = parsed.get("target").and_then(|v| v.as_table()) {
-            for (_target_name, target_value) in target {
+            for (target_name, target_value) in target {
                 if let Some(target_table) = target_value.as_table() {
-                    if let Some(deps) = target_table.get("dependencies").and_then(|v| v.as_table()) {
-                        all_deps.extend(self.parse_deps_table(deps, path, &content));
+                    if let Some(deps) = target_table.get("dependencies").and_then(|v| v.as_table())
+                    {
+                        all_deps.extend(self.parse_deps_table(
+                            deps,
+                            path,
+                            &content,
+                            &format!("target.{target_name}.dependencies"),
+                        ));
                     }
-                    if let Some(deps) = target_table.get("dev-dependencies").and_then(|v| v.as_table()) {
-                        all_deps.extend(self.parse_deps_table(deps, path, &content));
+                    if let Some(deps) = target_table
+                        .get("dev-dependencies")
+                        .and_then(|v| v.as_table())
+                    {
+                        all_deps.extend(self.parse_deps_table(
+                            deps,
+                            path,
+                            &content,
+                            &format!("target.{target_name}.dev-dependencies"),
+                        ));
                     }
                 }
             }
@@ -294,9 +323,7 @@ impl DependencyParser for CargoTomlParser {
     }
 
     fn can_parse(&self, path: &Path) -> bool {
-        path.file_name()
-            .map(|n| n == "Cargo.toml")
-            .unwrap_or(false)
+        path.file_name().map(|n| n == "Cargo.toml").unwrap_or(false)
     }
 }
 
@@ -434,17 +461,31 @@ direct-dep = "2.0"
 
         // serde and tokio resolved from workspace, direct-dep is direct,
         // local-dep is a path dep and should be skipped
-        assert_eq!(deps.len(), 3, "deps: {:?}", deps.iter().map(|d| &d.name).collect::<Vec<_>>());
+        assert_eq!(
+            deps.len(),
+            3,
+            "deps: {:?}",
+            deps.iter().map(|d| &d.name).collect::<Vec<_>>()
+        );
 
         let serde_dep = deps.iter().find(|d| d.name == "serde").expect("serde");
-        assert_eq!(serde_dep.version_spec.version_string().expect("version"), "1.0.200");
+        assert_eq!(
+            serde_dep.version_spec.version_string().expect("version"),
+            "1.0.200"
+        );
         // source_file should point to root Cargo.toml for workspace deps
         assert_eq!(serde_dep.source_file, root_toml);
 
         let tokio_dep = deps.iter().find(|d| d.name == "tokio").expect("tokio");
-        assert_eq!(tokio_dep.version_spec.version_string().expect("version"), "1.38");
+        assert_eq!(
+            tokio_dep.version_spec.version_string().expect("version"),
+            "1.38"
+        );
 
-        let direct = deps.iter().find(|d| d.name == "direct-dep").expect("direct-dep");
+        let direct = deps
+            .iter()
+            .find(|d| d.name == "direct-dep")
+            .expect("direct-dep");
         assert_eq!(direct.source_file, member_toml);
 
         Ok(())

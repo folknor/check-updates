@@ -1,5 +1,5 @@
-use check_updates_core::{DependencyCheck, UpdateSeverity};
 use anyhow::{Context, Result};
+use check_updates_core::{DependencyCheck, UpdateSeverity};
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
@@ -43,7 +43,8 @@ impl FileUpdater {
             };
 
             if let Some(spec) = version_spec
-                && spec.is_rewritable() {
+                && spec.is_rewritable()
+            {
                 // Use Cargo-specific serialization (bare version = caret, = for pin, etc.)
                 // Strip build metadata (+...) since it's not valid in Cargo.toml version requirements
                 let new_version = spec.to_cargo_string().unwrap_or_else(|| spec.to_string());
@@ -90,7 +91,12 @@ impl FileUpdater {
                 .manifest_key
                 .as_deref()
                 .unwrap_or(&check.dependency.name);
-            self.update_dependency(&mut doc, lookup_key, new_version);
+            self.update_dependency(
+                &mut doc,
+                lookup_key,
+                new_version,
+                check.dependency.section.as_deref(),
+            );
         }
 
         // Write the updated content
@@ -100,43 +106,84 @@ impl FileUpdater {
         Ok(())
     }
 
-    /// Update a dependency version in the document
-    fn update_dependency(&self, doc: &mut DocumentMut, name: &str, new_version: &str) {
+    /// Update a dependency version in the document.
+    ///
+    /// When the parser recorded which table the dependency came from, only that
+    /// table is rewritten. The same crate routinely appears in `[dependencies]`
+    /// and `[dev-dependencies]` (or under several `[target.'cfg(..)']` tables) at
+    /// deliberately different versions, and rewriting all of them at once
+    /// silently destroys the versions we never checked. `None` means the section
+    /// is unknown and we fall back to the historical all-sections sweep.
+    fn update_dependency(
+        &self,
+        doc: &mut DocumentMut,
+        name: &str,
+        new_version: &str,
+        section: Option<&str>,
+    ) {
+        if let Some(section) = section {
+            if let Some(dep) = Self::resolve_section(doc, section).and_then(|t| t.get_mut(name)) {
+                self.update_dep_value(dep, new_version);
+            }
+            return;
+        }
+
         // Try each dependency section
-        let sections = [
-            "dependencies",
-            "dev-dependencies",
-            "build-dependencies",
-        ];
+        let sections = ["dependencies", "dev-dependencies", "build-dependencies"];
 
         for section in sections {
             if let Some(deps) = doc.get_mut(section)
-                && let Some(dep) = deps.get_mut(name) {
-                    self.update_dep_value(dep, new_version);
-                }
+                && let Some(dep) = deps.get_mut(name)
+            {
+                self.update_dep_value(dep, new_version);
+            }
         }
 
         // Try workspace.dependencies
         if let Some(workspace) = doc.get_mut("workspace")
             && let Some(deps) = workspace.get_mut("dependencies")
-                && let Some(dep) = deps.get_mut(name) {
-                    self.update_dep_value(dep, new_version);
-                }
+            && let Some(dep) = deps.get_mut(name)
+        {
+            self.update_dep_value(dep, new_version);
+        }
 
         // Try target.*.dependencies
         if let Some(target) = doc.get_mut("target")
-            && let Some(target_table) = target.as_table_mut() {
-                for (_, target_value) in target_table.iter_mut() {
-                    if let Some(deps) = target_value.get_mut("dependencies")
-                        && let Some(dep) = deps.get_mut(name) {
-                            self.update_dep_value(dep, new_version);
-                        }
-                    if let Some(deps) = target_value.get_mut("dev-dependencies")
-                        && let Some(dep) = deps.get_mut(name) {
-                            self.update_dep_value(dep, new_version);
-                        }
+            && let Some(target_table) = target.as_table_mut()
+        {
+            for (_, target_value) in target_table.iter_mut() {
+                if let Some(deps) = target_value.get_mut("dependencies")
+                    && let Some(dep) = deps.get_mut(name)
+                {
+                    self.update_dep_value(dep, new_version);
+                }
+                if let Some(deps) = target_value.get_mut("dev-dependencies")
+                    && let Some(dep) = deps.get_mut(name)
+                {
+                    self.update_dep_value(dep, new_version);
                 }
             }
+        }
+    }
+
+    /// Resolve a recorded section name to the table that holds the dependency
+    /// entries. Target sections are matched by prefix/suffix rather than by
+    /// splitting on `.`, because the target key itself is usually a quoted
+    /// `cfg(...)` expression containing dots.
+    fn resolve_section<'a>(doc: &'a mut DocumentMut, section: &str) -> Option<&'a mut Item> {
+        match section {
+            "dependencies" | "dev-dependencies" | "build-dependencies" => doc.get_mut(section),
+            "workspace.dependencies" => doc.get_mut("workspace")?.get_mut("dependencies"),
+            other => {
+                let rest = other.strip_prefix("target.")?;
+                let (target_key, kind) = if let Some(k) = rest.strip_suffix(".dev-dependencies") {
+                    (k, "dev-dependencies")
+                } else {
+                    (rest.strip_suffix(".dependencies")?, "dependencies")
+                };
+                doc.get_mut("target")?.get_mut(target_key)?.get_mut(kind)
+            }
+        }
     }
 
     /// Update the version value in a dependency item
@@ -152,22 +199,24 @@ impl FileUpdater {
             // Inline table: serde = { version = "1.0", ... }
             Item::Value(Value::InlineTable(table)) => {
                 if let Some(version) = table.get_mut("version")
-                    && let Value::String(s) = version {
-                        let decor = s.decor().clone();
-                        let mut new_str = toml_edit::Formatted::new(new_version.to_string());
-                        *new_str.decor_mut() = decor;
-                        *s = new_str;
-                    }
+                    && let Value::String(s) = version
+                {
+                    let decor = s.decor().clone();
+                    let mut new_str = toml_edit::Formatted::new(new_version.to_string());
+                    *new_str.decor_mut() = decor;
+                    *s = new_str;
+                }
             }
             // Full table: [dependencies.serde] version = "1.0"
             Item::Table(table) => {
                 if let Some(version_item) = table.get_mut("version")
-                    && let Item::Value(Value::String(s)) = version_item {
-                        let decor = s.decor().clone();
-                        let mut new_str = toml_edit::Formatted::new(new_version.to_string());
-                        *new_str.decor_mut() = decor;
-                        *s = new_str;
-                    }
+                    && let Item::Value(Value::String(s)) = version_item
+                {
+                    let decor = s.decor().clone();
+                    let mut new_str = toml_edit::Formatted::new(new_version.to_string());
+                    *new_str.decor_mut() = decor;
+                    *s = new_str;
+                }
             }
             _ => {}
         }
@@ -222,6 +271,7 @@ mod tests {
                 line_number: 2,
                 original_line: format!("{name} = \"{spec_str}\""),
                 manifest_key: None,
+                section: None,
             },
             installed: Some(Version::from_str(spec_str).unwrap()),
             in_range: Some(target.clone()),
@@ -234,6 +284,47 @@ mod tests {
             target_released_at: None,
             latest_released_at: None,
         }
+    }
+
+    /// A crate pinned at different versions in two tables must only have the
+    /// table it was read from rewritten; the other version is a deliberate
+    /// choice we never checked and must not be clobbered.
+    #[test]
+    fn update_is_scoped_to_the_recorded_section() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        writeln!(
+            file,
+            r#"[dependencies]
+serde = "1.0.0"
+
+[dev-dependencies]
+serde = "1.0.1"
+"#
+        )?;
+        file.flush()?;
+
+        let temp_path = file.path().to_path_buf();
+
+        let mut check = create_check(
+            "serde",
+            "1.0.0",
+            temp_path.clone(),
+            "1.0.200",
+            UpdateSeverity::Patch,
+        );
+        check.dependency.section = Some("dependencies".to_string());
+
+        let updater = FileUpdater::new();
+        updater.apply_updates(&[check], false, false)?;
+
+        let content = fs::read_to_string(&temp_path)?;
+        assert!(content.contains("1.0.200"), "{content}");
+        assert!(
+            content.contains("1.0.1"),
+            "dev-dependencies must be untouched: {content}"
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -251,16 +342,34 @@ tokio = "1.0.0"
         let temp_path = file.path().to_path_buf();
 
         let checks = vec![
-            create_check("serde", "1.0.0", temp_path.clone(), "1.0.200", UpdateSeverity::Patch),
-            create_check("tokio", "1.0.0", temp_path.clone(), "1.5.0", UpdateSeverity::Minor),
+            create_check(
+                "serde",
+                "1.0.0",
+                temp_path.clone(),
+                "1.0.200",
+                UpdateSeverity::Patch,
+            ),
+            create_check(
+                "tokio",
+                "1.0.0",
+                temp_path.clone(),
+                "1.5.0",
+                UpdateSeverity::Minor,
+            ),
         ];
 
         let updater = FileUpdater::new();
         updater.apply_updates(&checks, false, false)?; // patch only
 
         let content = fs::read_to_string(&temp_path)?;
-        assert!(content.contains("1.0.200"), "serde should be updated: {content}");
-        assert!(!content.contains("1.5.0"), "tokio should NOT be updated: {content}");
+        assert!(
+            content.contains("1.0.200"),
+            "serde should be updated: {content}"
+        );
+        assert!(
+            !content.contains("1.5.0"),
+            "tokio should NOT be updated: {content}"
+        );
 
         Ok(())
     }
@@ -280,16 +389,34 @@ tokio = "1.0.0"
         let temp_path = file.path().to_path_buf();
 
         let checks = vec![
-            create_check("serde", "1.0.0", temp_path.clone(), "1.0.200", UpdateSeverity::Patch),
-            create_check("tokio", "1.0.0", temp_path.clone(), "1.5.0", UpdateSeverity::Minor),
+            create_check(
+                "serde",
+                "1.0.0",
+                temp_path.clone(),
+                "1.0.200",
+                UpdateSeverity::Patch,
+            ),
+            create_check(
+                "tokio",
+                "1.0.0",
+                temp_path.clone(),
+                "1.5.0",
+                UpdateSeverity::Minor,
+            ),
         ];
 
         let updater = FileUpdater::new();
         updater.apply_updates(&checks, true, false)?; // patch + minor
 
         let content = fs::read_to_string(&temp_path)?;
-        assert!(content.contains("1.0.200"), "serde should be updated: {content}");
-        assert!(content.contains("1.5.0"), "tokio should be updated: {content}");
+        assert!(
+            content.contains("1.0.200"),
+            "serde should be updated: {content}"
+        );
+        assert!(
+            content.contains("1.5.0"),
+            "tokio should be updated: {content}"
+        );
 
         Ok(())
     }

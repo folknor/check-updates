@@ -1,6 +1,6 @@
 use crate::global::UpgradeCommand;
-use check_updates_core::Version;
 use anyhow::Result;
+use check_updates_core::Version;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -45,7 +45,6 @@ impl UvPythonCheck {
             && self.latest_version.minor == self.installed_version.minor
     }
 }
-
 
 /// Discovery and checking for uv-managed Python installations
 pub struct UvPythonDiscovery {}
@@ -121,7 +120,10 @@ impl UvPythonDiscovery {
     }
 
     /// Build latest available versions per series from uv python list output
-    fn latest_versions_from_uv_list(&self, all_versions: &[UvPythonInfo]) -> HashMap<String, Version> {
+    fn latest_versions_from_uv_list(
+        &self,
+        all_versions: &[UvPythonInfo],
+    ) -> HashMap<String, Version> {
         let mut latest: HashMap<String, Version> = HashMap::new();
         for info in all_versions {
             let series = format!("{}.{}", info.version.major, info.version.minor);

@@ -15,7 +15,11 @@ impl LockfileParser {
     }
 
     /// Parse installed versions from a lock file
-    pub fn parse(&self, path: &Path, lockfile_type: LockfileType) -> Result<HashMap<String, Version>> {
+    pub fn parse(
+        &self,
+        path: &Path,
+        lockfile_type: LockfileType,
+    ) -> Result<HashMap<String, Version>> {
         match lockfile_type {
             LockfileType::Npm => self.parse_package_lock(path),
             LockfileType::Pnpm => self.parse_pnpm_lock(path),
@@ -43,10 +47,7 @@ impl LockfileParser {
                 }
 
                 // Extract package name from path (node_modules/name or node_modules/@scope/name)
-                let name = key
-                    .strip_prefix("node_modules/")
-                    .unwrap_or(key)
-                    .to_string();
+                let name = key.strip_prefix("node_modules/").unwrap_or(key).to_string();
 
                 // Skip nested node_modules
                 if name.contains("node_modules/") {
@@ -54,9 +55,10 @@ impl LockfileParser {
                 }
 
                 if let Some(version_str) = pkg_data.get("version").and_then(|v| v.as_str())
-                    && let Ok(version) = Version::from_str(version_str) {
-                        versions.insert(name, version);
-                    }
+                    && let Ok(version) = Version::from_str(version_str)
+                {
+                    versions.insert(name, version);
+                }
             }
         }
         // npm v6 format: dependencies field
@@ -74,9 +76,10 @@ impl LockfileParser {
     ) {
         for (name, data) in deps {
             if let Some(version_str) = data.get("version").and_then(|v| v.as_str())
-                && let Ok(version) = Version::from_str(version_str) {
-                    versions.insert(name.clone(), version);
-                }
+                && let Ok(version) = Version::from_str(version_str)
+            {
+                versions.insert(name.clone(), version);
+            }
         }
     }
 
@@ -95,9 +98,10 @@ impl LockfileParser {
         if let Some(packages) = parsed.get("packages").and_then(|v| v.as_mapping()) {
             for (key, _) in packages {
                 if let Some(key_str) = key.as_str()
-                    && let Some((name, version)) = Self::parse_pnpm_package_key(key_str) {
-                        versions.insert(name, version);
-                    }
+                    && let Some((name, version)) = Self::parse_pnpm_package_key(key_str)
+                {
+                    versions.insert(name, version);
+                }
             }
         }
 
@@ -105,9 +109,10 @@ impl LockfileParser {
         if let Some(snapshots) = parsed.get("snapshots").and_then(|v| v.as_mapping()) {
             for (key, _) in snapshots {
                 if let Some(key_str) = key.as_str()
-                    && let Some((name, version)) = Self::parse_pnpm_package_key(key_str) {
-                        versions.entry(name).or_insert(version);
-                    }
+                    && let Some((name, version)) = Self::parse_pnpm_package_key(key_str)
+                {
+                    versions.entry(name).or_insert(version);
+                }
             }
         }
 
@@ -169,11 +174,14 @@ impl LockfileParser {
 
             // Version line
             if trimmed.starts_with("version")
-                && let Some(version) = Self::parse_yarn_version_line(trimmed) {
-                    for pkg in &current_packages {
-                        versions.entry(pkg.clone()).or_insert_with(|| version.clone());
-                    }
+                && let Some(version) = Self::parse_yarn_version_line(trimmed)
+            {
+                for pkg in &current_packages {
+                    versions
+                        .entry(pkg.clone())
+                        .or_insert_with(|| version.clone());
                 }
+            }
         }
 
         Ok(versions)
@@ -272,8 +280,7 @@ mod tests {
         assert_eq!(name, "express");
         assert_eq!(version.to_string(), "4.18.2");
 
-        let (name, version) =
-            LockfileParser::parse_pnpm_package_key("@types/node@20.0.0").unwrap();
+        let (name, version) = LockfileParser::parse_pnpm_package_key("@types/node@20.0.0").unwrap();
         assert_eq!(name, "@types/node");
         assert_eq!(version.to_string(), "20.0.0");
     }

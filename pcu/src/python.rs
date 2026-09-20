@@ -26,23 +26,20 @@ impl PythonInfo {
 /// Detect the current Python version
 pub fn detect_python_version() -> Option<Version> {
     // Try python3 first, then python
-    let commands = [
-        ("python3", ["--version"]),
-        ("python", ["--version"]),
-    ];
+    let commands = [("python3", ["--version"]), ("python", ["--version"])];
 
     for (cmd, args) in &commands {
         if let Ok(output) = Command::new(cmd).args(args.as_slice()).output()
-            && output.status.success() {
-                let version_output = String::from_utf8_lossy(&output.stdout);
-                // Output is like "Python 3.11.5"
-                if let Some(version_str) = version_output
-                    .trim()
-                    .strip_prefix("Python ")
-                    && let Ok(version) = Version::from_str(version_str) {
-                        return Some(version);
-                    }
+            && output.status.success()
+        {
+            let version_output = String::from_utf8_lossy(&output.stdout);
+            // Output is like "Python 3.11.5"
+            if let Some(version_str) = version_output.trim().strip_prefix("Python ")
+                && let Ok(version) = Version::from_str(version_str)
+            {
+                return Some(version);
             }
+        }
     }
 
     None
@@ -84,9 +81,7 @@ pub fn fetch_latest_python_version(current: &Version) -> Option<Version> {
         let version_str = name_parts[1];
         if let Ok(version) = Version::from_str(version_str) {
             let series = format!("{}.{}", version.major, version.minor);
-            if series == current_series
-                && best.as_ref().is_none_or(|b| version > *b)
-            {
+            if series == current_series && best.as_ref().is_none_or(|b| version > *b) {
                 best = Some(version);
             }
         }

@@ -1,5 +1,5 @@
+use anyhow::{Context, Result, anyhow};
 use check_updates_core::{PackageInfo, Version};
-use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -39,7 +39,9 @@ impl CratesIoClient {
         Self {
             client: reqwest::Client::builder()
                 // crates.io requires a user-agent with contact info
-                .user_agent("cargo-check-updates/0.1.0 (https://github.com/folknor/cargo-check-updates)")
+                .user_agent(
+                    "cargo-check-updates/0.1.0 (https://github.com/folknor/cargo-check-updates)",
+                )
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
@@ -130,10 +132,7 @@ impl CratesIoClient {
         };
 
         // Get latest stable version (always filter out prereleases)
-        let latest_stable = all_versions
-            .iter()
-            .rfind(|v| !v.is_prerelease())
-            .cloned();
+        let latest_stable = all_versions.iter().rfind(|v| !v.is_prerelease()).cloned();
 
         Ok(PackageInfo {
             name: crate_data.crate_info.name,
@@ -249,7 +248,11 @@ mod tests {
         let client = CratesIoClient::new(false);
         let result = client.get_package("serde").await;
 
-        assert!(result.is_ok(), "Failed to fetch serde crate: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to fetch serde crate: {:?}",
+            result.err()
+        );
 
         let package_info = result.unwrap();
         assert_eq!(package_info.name.to_lowercase(), "serde");
@@ -260,7 +263,9 @@ mod tests {
     #[tokio::test]
     async fn test_get_package_not_found() {
         let client = CratesIoClient::new(false);
-        let result = client.get_package("this-crate-definitely-does-not-exist-12345").await;
+        let result = client
+            .get_package("this-crate-definitely-does-not-exist-12345")
+            .await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));

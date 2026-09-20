@@ -1,5 +1,5 @@
-use check_updates_core::Version;
 use anyhow::{Context, Result};
+use check_updates_core::Version;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -30,13 +30,10 @@ impl CargoLockParser {
                 if let (Some(name), Some(version_str)) = (
                     package.get("name").and_then(|v| v.as_str()),
                     package.get("version").and_then(|v| v.as_str()),
-                )
-                    && let Ok(version) = Version::from_str(version_str) {
-                        versions
-                            .entry(name.to_string())
-                            .or_default()
-                            .push(version);
-                    }
+                ) && let Ok(version) = Version::from_str(version_str)
+                {
+                    versions.entry(name.to_string()).or_default().push(version);
+                }
             }
         }
 

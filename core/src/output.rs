@@ -13,10 +13,8 @@ impl TableRenderer {
 
     /// Render all packages with updates
     pub fn render(&self, checks: &[DependencyCheck], header: &str) {
-        let checks_with_updates: Vec<&DependencyCheck> = checks
-            .iter()
-            .filter(|check| check.has_update())
-            .collect();
+        let checks_with_updates: Vec<&DependencyCheck> =
+            checks.iter().filter(|check| check.has_update()).collect();
 
         self.render_deduped(&checks_with_updates, header);
     }
@@ -28,24 +26,41 @@ impl TableRenderer {
             return;
         }
 
-        // Calculate column widths
+        // Calculate column widths.
+        //
+        // These must be counted in `char`s, not bytes: the `{:<w$}` padding
+        // below is implemented by `Display for str`, which delegates to
+        // `Formatter::pad` and measures the string in `chars().count()`. Using
+        // `str::len()` here would measure the same strings in bytes, so the two
+        // sides of the alignment would disagree for any non-ASCII input and the
+        // column would over-pad by the number of continuation bytes.
+        //
+        // This is char count, not terminal display width. A correct display
+        // width (CJK names are one char but two columns; combining marks are
+        // chars of zero width) cannot be expressed through `{:<w$}` at all -
+        // `Formatter::pad` has no hook for a custom metric, so it would require
+        // dropping the format-spec padding for hand-rolled padding plus a
+        // `unicode-width` dependency. That is not worth paying for here:
+        // crates.io, npm and PyPI all constrain package names to ASCII, and
+        // semver / PEP 440 versions are ASCII too, so no string reaching this
+        // renderer can differ between chars and columns.
         let max_name = checks
             .iter()
-            .map(|c| c.dependency.name.len())
+            .map(|c| c.dependency.name.chars().count())
             .max()
             .unwrap_or(0);
 
         let max_from = checks
             .iter()
             .filter_map(|c| c.current_version())
-            .map(|v| v.to_string().len())
+            .map(|v| v.to_string().chars().count())
             .max()
             .unwrap_or(0);
 
         let max_to = checks
             .iter()
             .filter_map(|c| c.target.as_ref())
-            .map(|v| v.to_string().len())
+            .map(|v| v.to_string().chars().count())
             .max()
             .unwrap_or(0);
 
@@ -121,5 +136,25 @@ impl TableRenderer {
             }
             None => String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Guards the assumption documented in `render_deduped`: `{:<w$}` measures
+    /// the padded string in `char`s, so column widths must be counted the same
+    /// way. If this ever fails, the width computation needs to change with it.
+    #[test]
+    fn format_padding_is_measured_in_chars_not_bytes() {
+        let name = "kaffé";
+        assert_eq!(name.len(), 6, "test input must be multi-byte");
+        assert_eq!(name.chars().count(), 5);
+
+        let width = name.chars().count();
+        let padded = format!("{name:<width$}|");
+        assert_eq!(padded, "kaffé|", "char width must produce no extra padding");
+
+        let byte_padded = format!("{name:<w$}|", w = name.len());
+        assert_eq!(byte_padded, "kaffé |", "byte width over-pads by one column");
     }
 }

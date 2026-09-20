@@ -66,7 +66,11 @@ impl GlobalTableRenderer {
     }
 
     fn render_registry_rows(&self, checks: &[&&GlobalCheck]) {
-        let max_name = checks.iter().map(|c| c.package.name.len()).max().unwrap_or(0);
+        let max_name = checks
+            .iter()
+            .map(|c| c.package.name.len())
+            .max()
+            .unwrap_or(0);
         let max_installed = checks
             .iter()
             .map(|c| c.package.installed_version.to_string().len())
@@ -129,9 +133,11 @@ impl GlobalTableRenderer {
 
     /// Render a group that shows commits behind (used for both git and path sources)
     fn render_commits_group(&self, header: &str, checks: &[&GlobalCheck], show_hash: bool) {
+        // A failed check is shown alongside real updates: leaving it out would
+        // let "All packages up to date." cover a package we could not check.
         let updates: Vec<&&GlobalCheck> = checks
             .iter()
-            .filter(|c| c.has_update || c.has_dirty_changes)
+            .filter(|c| c.has_update || c.has_dirty_changes || c.check_failed)
             .collect();
 
         println!("{header}");
@@ -144,7 +150,11 @@ impl GlobalTableRenderer {
     }
 
     fn render_commits_rows(&self, checks: &[&&GlobalCheck], show_hash: bool) {
-        let max_name = checks.iter().map(|c| c.package.name.len()).max().unwrap_or(0);
+        let max_name = checks
+            .iter()
+            .map(|c| c.package.name.len())
+            .max()
+            .unwrap_or(0);
 
         let mut sorted = checks.to_vec();
         sorted.sort_by_key(|a| a.package.name.to_lowercase());
@@ -152,8 +162,18 @@ impl GlobalTableRenderer {
         for check in sorted {
             let mut status_parts: Vec<String> = Vec::new();
 
+            if check.check_failed {
+                let unknown = "could not check";
+                if self.show_colors {
+                    status_parts.push(unknown.dimmed().to_string());
+                } else {
+                    status_parts.push(unknown.to_string());
+                }
+            }
+
             if let Some(n) = check.commits_behind
                 && n > 0
+                && !check.check_failed
             {
                 let behind_str = if n == 1 {
                     "1 commit behind".to_string()

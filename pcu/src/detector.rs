@@ -47,12 +47,13 @@ impl ProjectDetector {
         // Check for pyproject.toml and determine which package manager
         let pyproject_path = self.project_path.join("pyproject.toml");
         if pyproject_path.exists()
-            && let Some(pm) = self.detect_pyproject_manager(&pyproject_path)? {
-                detected_files.push(DetectedFile {
-                    path: pyproject_path,
-                    package_manager: pm,
-                });
-            }
+            && let Some(pm) = self.detect_pyproject_manager(&pyproject_path)?
+        {
+            detected_files.push(DetectedFile {
+                path: pyproject_path,
+                package_manager: pm,
+            });
+        }
 
         // Check for requirements*.txt files (pip)
         if let Ok(entries) = fs::read_dir(&self.project_path) {
@@ -85,7 +86,10 @@ impl ProjectDetector {
     }
 
     /// Detect which package manager uses pyproject.toml
-    fn detect_pyproject_manager(&self, pyproject_path: &Path) -> anyhow::Result<Option<PackageManager>> {
+    fn detect_pyproject_manager(
+        &self,
+        pyproject_path: &Path,
+    ) -> anyhow::Result<Option<PackageManager>> {
         let contents = fs::read_to_string(pyproject_path)?;
 
         // Check for lock files to disambiguate
@@ -107,8 +111,10 @@ impl ProjectDetector {
         } else {
             // If no lock file exists but pyproject.toml has dependencies,
             // default to uv (PEP 621 standard)
-            if contents.contains("[project]") &&
-               (contents.contains("dependencies") || contents.contains("[project.dependencies]")) {
+            if contents.contains("[project]")
+                && (contents.contains("dependencies")
+                    || contents.contains("[project.dependencies]"))
+            {
                 Ok(Some(PackageManager::Uv))
             } else {
                 // No recognizable package manager
@@ -162,7 +168,11 @@ mod tests {
         let detected = detector.detect().unwrap();
 
         assert_eq!(detected.len(), 2);
-        assert!(detected.iter().all(|d| d.package_manager == PackageManager::Pip));
+        assert!(
+            detected
+                .iter()
+                .all(|d| d.package_manager == PackageManager::Pip)
+        );
     }
 
     #[test]
@@ -218,7 +228,11 @@ mod tests {
         let pyproject_path = temp_dir.path().join("pyproject.toml");
         let uv_lock_path = temp_dir.path().join("uv.lock");
 
-        fs::write(&pyproject_path, "[project]\nname = \"test\"\ndependencies = []\n").unwrap();
+        fs::write(
+            &pyproject_path,
+            "[project]\nname = \"test\"\ndependencies = []\n",
+        )
+        .unwrap();
         fs::write(&uv_lock_path, "").unwrap();
 
         let detector = ProjectDetector::new(temp_dir.path().to_path_buf());
@@ -233,7 +247,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let pyproject_path = temp_dir.path().join("pyproject.toml");
 
-        fs::write(&pyproject_path, "[project]\nname = \"test\"\ndependencies = [\"requests\"]\n").unwrap();
+        fs::write(
+            &pyproject_path,
+            "[project]\nname = \"test\"\ndependencies = [\"requests\"]\n",
+        )
+        .unwrap();
 
         let detector = ProjectDetector::new(temp_dir.path().to_path_buf());
         let detected = detector.detect().unwrap();
@@ -284,8 +302,16 @@ mod tests {
         let detected = detector.detect().unwrap();
 
         assert_eq!(detected.len(), 2);
-        assert!(detected.iter().any(|d| d.package_manager == PackageManager::Pip));
-        assert!(detected.iter().any(|d| d.package_manager == PackageManager::Conda));
+        assert!(
+            detected
+                .iter()
+                .any(|d| d.package_manager == PackageManager::Pip)
+        );
+        assert!(
+            detected
+                .iter()
+                .any(|d| d.package_manager == PackageManager::Conda)
+        );
     }
 
     #[test]
@@ -312,10 +338,19 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let detector = ProjectDetector::new(temp_dir.path().to_path_buf());
 
-        assert_eq!(detector.get_sync_command(&PackageManager::Pip), "pip install -r requirements.txt");
+        assert_eq!(
+            detector.get_sync_command(&PackageManager::Pip),
+            "pip install -r requirements.txt"
+        );
         assert_eq!(detector.get_sync_command(&PackageManager::Uv), "uv lock");
-        assert_eq!(detector.get_sync_command(&PackageManager::Poetry), "poetry lock");
+        assert_eq!(
+            detector.get_sync_command(&PackageManager::Poetry),
+            "poetry lock"
+        );
         assert_eq!(detector.get_sync_command(&PackageManager::Pdm), "pdm lock");
-        assert_eq!(detector.get_sync_command(&PackageManager::Conda), "conda env update");
+        assert_eq!(
+            detector.get_sync_command(&PackageManager::Conda),
+            "conda env update"
+        );
     }
 }

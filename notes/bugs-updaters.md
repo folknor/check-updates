@@ -12,92 +12,40 @@
 Findings about the one operation in these tools that mutates the user's files:
 `ccu/src/updater.rs`, `ncu/src/updater.rs`, `pcu/src/updater.rs`.
 
-## UPD-001 - ccu rewrites a crate name in every section of the manifest
+## UPD-016 - ccu's updater has no "did this actually apply" signal
 
-Reported by ccu. Called "a data-loss-class bug in the one operation that mutates
-the user's files".
+Surfaced while closing UPD-001, and made sharper by that fix.
 
-`update_dependency` walks `dependencies`, `dev-dependencies`,
-`build-dependencies`, `workspace.dependencies` and every
-`target.*.{dependencies,dev-dependencies}`, and writes `new_version` into *all*
-entries matching the key. It has no notion of which section the
-`DependencyCheck` actually came from: `Dependency` carries `source_file` but not
-the section it was parsed from, so the information is not captured at parse
-time.
+`ccu/src/updater.rs::update_dependency` returns `()`, so `apply_updates`
+reports every file it wrote as modified whether or not the lookup found
+anything. This was survivable while the updater swept every section - a
+mis-recorded section still hit the right entry somewhere. Now that a write is
+scoped to the single recorded `section`, a stale or wrong value fails silently
+with nothing to catch it.
 
-Concretely: `foo = "1.0"` under `[dependencies]` and `foo = "0.9"` under
-`[dev-dependencies]` produce two checks with different targets; each application
-writes *both* entries, so the dev-dependency gets force-bumped across a major
-(or the normal dep gets downgraded) depending on the iteration order of the
-`HashMap<PathBuf, Vec<...>>`. Which one wins is nondeterministic across runs.
+`pcu` already threads an applied/not-applied result through its updater; `ccu`
+does not. Same defect class as the "report only the updates that were actually
+applied" work, left undone on the ccu side.
 
-No amount of care inside `update_dependency` fixes this without `Dependency`
-carrying the manifest section (and ideally a `toml_edit` path).
+Related gap: no test covers a `target.'cfg(...)'` section round-trip.
+`resolve_section` matches those by prefix/suffix rather than splitting on `.`,
+because the target key is normally a quoted `cfg(...)` containing dots. That
+reasoning is sound (both `toml` and `toml_edit` hand back unquoted keys) but is
+only exercised through the plain `[dependencies]` case.
 
-## UPD-002 - ncu writes version strings that are not valid npm syntax
+## UPD-005 - `apply_updates` does not report per-check outcomes
 
-Reported by ncu as "the single worst bug in scope".
+Reported by pcu-runtime. Narrowed: the dishonest-`modified_files` half is fixed
+in `pcu/src/updater.rs` and `ncu/src/updater.rs` - both now record a file only
+when its bytes actually changed, and the pcu replacement path fails closed
+rather than silently returning the line unchanged.
 
-`ncu/src/updater.rs` builds the replacement with `spec.to_string()`, i.e.
-`impl Display for VersionSpec` in `core/src/version.rs`, which is
-Python/PEP-440 flavoured:
-
-- `Pinned(v)` -> `"==4.18.2"`. A bare `"express": "4.18.2"` parses to `Pinned`,
-  so exact-pinned deps - extremely common - are rewritten to `"==4.18.2"`, which
-  npm rejects.
-- `Wildcard` -> `"==1.2.*"`, `Compatible` -> `"~=1.2.3"`, `Range` ->
-  `">=1.0.0,<2.0.0"` (npm ranges are space-separated, not comma-separated).
-
-Only `Caret`/`Tilde`/`Minimum`/`Maximum`/`GreaterThan`/`LessThan` round-trip.
-ccu has `to_cargo_string()` for exactly this reason; there is no
-`to_npm_string()` and ncu never asks for one.
-
-## UPD-003 - `ncu -u` alphabetically reorders the entire package.json
-
-Reported by ncu.
-
-`update_file` does `serde_json::from_str::<Value>` -> mutate ->
-`to_string_pretty` -> overwrite. `serde_json` is declared as plain `"1"` in the
-root `Cargo.toml` with no `preserve_order` feature, so `Value::Object` is a
-`BTreeMap`: every key at every nesting level comes back sorted.
-`"name"`/`"version"`/`"scripts"`/`"dependencies"` get shuffled, dependency order
-inside each table is re-sorted, indentation is forced to serde's 2-space style,
-and the original layout is gone. The comment directly above the call says
-"update, and write back preserving formatting", which is false. ccu uses
-`toml_edit` precisely to avoid this.
-
-## UPD-004 - ncu writes the name into every dependency table it appears in
-
-Reported by ncu. Same shape as UPD-001.
-
-`update_dependency` loops over `dependencies`, `devDependencies`,
-`peerDependencies` and `optionalDependencies` and sets the value in *all* of
-them containing the key. If a package is in `dependencies` at `^1.0.0` and in
-`peerDependencies` at `^1 || ^2`, a `-u` run clobbers the peer range with the
-dependency's new pin. Peer ranges are deliberately wide; bumping them to the
-resolved latest is a semantic change nobody asked for. As with ccu,
-`Dependency` has no field recording the source table (`manifest_key` is for
-Cargo renames only).
-
-## UPD-005 - pcu's `modified_files` means "files we opened", not "files we changed"
-
-Reported by pcu-runtime.
-
-`update_file` never checks whether `replace_version_in_line` altered anything,
-and every replacement path ends in an infallible fallback
-(`Ok(line.replace(old_spec, new_spec))`) that returns the line unchanged on no
-match. The file is `fs::write`-ten regardless, `modified_files.insert` runs
-unconditionally, and `main.rs` prints `Updated N file(s)` under the header
-`Dependencies updated:`. Ways to hit it:
-
-- `line_idx >= lines.len()` - `continue`, silently (updater.rs:118-120).
-- The parser normalises a spec the file writes differently:
-  `VersionSpec::to_string()` emits `>=1.0,<2.0`, and a file containing
-  `>= 1.0, < 2.0` matches neither the name-qualified branch nor the fallback.
-  Nothing is written; pcu says it updated the file.
-
-Should compare new content against old, record a file only when it differs, and
-surface a per-check "not found in source line".
+The residue is the reporting shape. `apply_updates` still returns only a set of
+modified files, so a check that found no anchor in the source line is
+indistinguishable from one that was never attempted. The hunters' proposal -
+`Written | Unchanged | NotFound | Skipped(reason)` per check, with both the
+table and the JSON envelope driven off that one value - is unimplemented and
+spans `main.rs` and `output.rs` in all three tools. Shares a fix with RPT-003.
 
 ## UPD-006 - `pcu -uf` writes a different version than it reports
 
@@ -116,21 +64,24 @@ updates that were actually applied"): the severity-filter half was fixed, the
 force-target half was not. The same `force_spec`-vs-`target` split exists in ccu
 and ncu, which the hunters did not separately test.
 
-## UPD-007 - pcu's replacement is an unanchored whole-line substring swap
+## UPD-007 - pcu's pyproject rewriting is still not TOML-aware
 
-Reported by pcu-runtime.
+Reported by pcu-runtime. Narrowed: the unanchored whole-line swap is gone.
+`pcu/src/updater.rs` now anchors every replacement to a whole-token occurrence
+of the package name, rewrites once, preserves trailing comments and environment
+markers, and returns `None` rather than guessing when the spec is not where the
+parser claimed.
 
-The fallback rewrites text outside the version spec: trailing comments
-(`flask==2.0.3  # pin matches 2.0.3 in docs`), environment markers, and any
-second occurrence of the spec on the line. Even the "good" requirements branch
-uses `String::replace`, which is global rather than first-occurrence.
+The residue is that the updater still operates on one line of text. It has no
+document, no table path and no key, so a `dependencies = [...]` array folded
+onto one line is still addressed positionally rather than structurally. Going
+format-aware through `toml_edit` requires addressing a dependency as (table
+path, key), which `Dependency` does not carry: `manifest_key` is a Cargo-rename
+field and the new `section` is a table *name*, not a path to an array element.
 
-`replace_in_pyproject` gates on `line.to_lowercase().contains(package_name)` and
-then does a blind quoted-spec swap. For the PEP 621 form `"requests>=2.28.0",`
-the quoted form is `"requests>=2.28.0"`, not `">=2.28.0"`, so both quoted
-branches miss and it drops to the unanchored fallback. It is not TOML-aware at
-all: a `dependencies = [...]` array folded onto one line with two packages
-sharing a spec string cross-contaminates through that path.
+**Blocked on UPD-008.** While `pyproject.rs::find_line_in_content` returns a
+fuzzy substring hit and a synthesized line-1 fallback, a format-aware editor
+would only be a more confident way to edit the wrong node.
 
 ## UPD-008 - Fabricated and fuzzy line numbers feed a line-index rewriter
 
@@ -161,29 +112,18 @@ actively dangerous rather than merely cosmetic.
 All four are serialized into `--json` as fact. In ccu and ncu the updater does
 not use them (luckily); in pcu it does.
 
-## UPD-009 - Non-atomic truncating writes
+## UPD-009 - ncu and ccu still write manifests non-atomically
 
-Reported by pcu-runtime and ncu.
+Reported by pcu-runtime and ncu. Narrowed: pcu now writes through a sibling
+temp file and `fs::rename`, preserving permissions.
 
-Both write with a plain `fs::write` straight over the manifest. A crash, an
-interrupt or a full disk mid-write leaves a truncated `pyproject.toml` /
-`package.json`. Write-temp-then-rename is the norm for a tool whose entire job
-is editing other people's manifests.
+`ncu/src/updater.rs` and `ccu/src/updater.rs` still use a plain `fs::write`
+straight over the manifest, so a crash or full disk mid-write leaves a truncated
+`package.json` / `Cargo.toml`. The pcu implementation is the model to copy.
 
-## UPD-010 - CRLF files are silently converted to LF
-
-Reported by pcu-runtime and pcu-parsers.
-
-`content.lines()` strips the trailing `\r`; `lines.join("\n")` does not restore
-it. pcu reformats every line of a CRLF manifest, including lines it had no
-business touching.
-
-## UPD-011 - pcu writes unchanged files unconditionally
-
-Reported by pcu-runtime.
-
-An `fs::write` on a file with no effective change still bumps mtime and triggers
-watchers and rebuilds for a no-op run. Related to UPD-005.
+One caveat to copy knowingly rather than inherit: rename-into-place replaces a
+*symlinked* manifest with a regular file, where the old `fs::write` wrote
+through the link. Rare, but a behavior change, and pcu has it today.
 
 ## UPD-012 - ccu prints "Dependencies updated:" before performing the write
 
@@ -210,14 +150,6 @@ Reported by ccu.
 `[target.*.build-dependencies]`; the updater has the same gap. Consistently
 incomplete in both halves.
 
-## UPD-015 - Dead control flow in `replace_in_requirements`
-
-Reported by pcu-runtime.
-
-Lines 188-193: `line.replace(...).into()` on a `String` bound by
-`if let Some(new_line)` - the `.into()` produces `Option<String>` and is always
-`Some`. Fallible-looking code that cannot fail.
-
 ## Structural recommendation, as filed by the hunters
 
 pcu-runtime and ncu both argue the line/string-replacement approach is the root
@@ -226,15 +158,20 @@ cause and should be replaced by format-aware editors:
 - `pyproject.toml` through `toml_edit` (already a workspace dependency, already
   used by ccu); `environment.yml` through a YAML-aware editor; line-based
   replacement kept only for `requirements.txt`.
-- `package.json` through a text-span JSON editor that edits the value span in
-  the original string, so formatting and key order survive `-u` (UPD-003), paired
-  with a real npm range parser that rewrites only the comparator it is allowed to
-  touch and refuses anything it did not fully understand (see DSC-007).
 - Parsers should hand the updater a **byte span** recorded at parse time, not a
   line number plus a spec string to re-find (UPD-008).
 - `apply_updates` should return per-check outcomes
   (`Written | Unchanged | NotFound | Skipped(reason)`), with both the table and
   the JSON envelope driven off that one value, so "what we said" and "what we
   wrote" cannot diverge (UPD-005, UPD-006, RPT-003). Write atomically (UPD-009).
-- `Dependency` needs to carry the manifest *section* it came from, which is the
-  missing piece behind UPD-001 and UPD-004.
+
+The `package.json` half of this has landed: `ncu/src/updater.rs` now splices the
+value span in the original text, so key order, indentation and the trailing
+newline survive `-u`, and it refuses to write any spec it cannot render as valid
+npm syntax. The npm *range parser* it should be paired with does not exist yet -
+a `Complex` spec such as `^17 || ^18` is now silently skipped at write time
+rather than corrupted, but it is still displayed as checkable. See DSC-007.
+
+`Dependency` now carries `section`, which was the missing piece behind UPD-001
+and the ncu half. For a real `toml_edit` rewrite in pcu it is not sufficient: a
+table *name* is not a path to an array element inside `project.dependencies`.

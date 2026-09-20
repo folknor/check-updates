@@ -68,7 +68,12 @@ impl NpmClient {
             .dist_tags
             .get("latest")
             .and_then(|v| Version::from_str(v).ok())
-            .unwrap_or_else(|| versions.last().cloned().unwrap_or_else(|| Version::new(0, 0, 0)));
+            .unwrap_or_else(|| {
+                versions
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| Version::new(0, 0, 0))
+            });
 
         let latest_stable = versions.iter().rfind(|v| !v.is_prerelease()).cloned();
 
@@ -120,7 +125,10 @@ impl NpmClient {
         for (i, task) in tasks.into_iter().enumerate() {
             match task.await {
                 Ok(result) => results.push(result),
-                Err(e) => results.push(("unknown".to_string(), Err(anyhow::anyhow!("Task failed: {e}")))),
+                Err(e) => results.push((
+                    "unknown".to_string(),
+                    Err(anyhow::anyhow!("Task failed: {e}")),
+                )),
             }
             progress_callback(i + 1, total);
         }

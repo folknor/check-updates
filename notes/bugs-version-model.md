@@ -12,51 +12,6 @@
 Findings about `core/src/version.rs`, `core/src/resolver.rs` and the shared
 `Version` / `VersionSpec` model. Every CLI inherits these.
 
-## VER-001 - Named prereleases silently lose their patch number
-
-Reported independently by all five hunters (core, ccu, ncu, pcu-parsers,
-pcu-runtime), each calling it the highest-impact defect in its scope.
-
-`parse_prerelease` scans the pattern list `["dev","post","alpha","beta","rc","a","b","c","-"]`
-and splits at the first pattern found anywhere with `idx > 0`. `"-"` is checked
-**last**, so for `1.2.3-rc1` the match is `rc` at index 6 and the base string is
-`"1.2.3-"`. `from_str` then does `parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0)`
-- `"3-".parse::<u64>()` fails and the patch silently becomes **0**. Same for
-`-beta`, `-alpha`, `-dev`, `-post`, `-a/-b/-c`. Only a dash followed by an
-unrecognized word (`1.2.3-pre`) parses correctly, so behavior is inconsistent
-from one prerelease convention to the next.
-
-Consequences: `1.2.3-rc1 == 1.2.0-rc1` under `PartialEq`; ordering, `max()`,
-`in_range`, `target` and `severity` are all computed against a fabricated
-version. `Display` echoes `original`, so the number the user sees and the number
-the tool compared are different - which is why this is invisible in output.
-
-Downstream (ccu): under `--pre-release`, an update from `1.2.2` to `1.2.3-rc1`
-computes `severity = None` while `target` is `Some`, so the row prints,
-`will_update()` is false, `-u` refuses to write it, and it lands in the "skipped
-outside the selected severity" tally with no explanation. Also hits `ccu -g`
-when an installed binary's version in `.crates.toml` is a prerelease.
-
-Fix direction given by the hunters: parse strictly (numeric core, then the first
-`-`, then `+`), and stop using `unwrap_or(0)` for a segment that failed to parse
-- see VER-005.
-
-## VER-002 - Prerelease ordering is a plain string comparison
-
-Reported by core, ccu, ncu, pcu-parsers.
-
-`impl Ord for Version` does `(Some(a), Some(b)) => a.cmp(b)`, so
-`1.0.0-beta.10 < 1.0.0-beta.2`, `rc.2 < rc.10`, `alpha10 < alpha9`. `beta < rc`
-works only by accident of the alphabet, and `dev` sorts above `beta`/`alpha`
-instead of below. Semver requires dot-separated identifier comparison with
-numeric identifiers compared numerically; PEP 440 has its own ordering.
-
-The retained string is also inconsistent about whether it carries the leading
-`-` (`1.2.3-rc1` yields `"rc1"` today because of VER-001; `1.2.3rc1` also yields
-`"rc1"`; `1.2.3-1` yields `"-1"`), so mixed forms in one version list sort
-arbitrarily. Affects "latest" selection under `-p` and the
-`matching.sort(); matching.last()` lockfile pick in `ccu/src/main.rs`.
-
 ## VER-003 - PEP 440 post-releases are classified as pre-releases
 
 Reported by core, pcu-parsers, pcu-runtime.
@@ -83,32 +38,9 @@ has performed an epoch reset has its newest releases invisible, and pcu
 confidently reports an older version as latest. `Ord` also has no epoch field,
 so even once parsed they would order wrong.
 
-## VER-005 - `unwrap_or(0)` turns a failed parse into valid-looking data
-
-Reported by core, ncu, pcu-runtime (as the root smell behind VER-001).
-
-A numeric segment that fails to parse becomes `0` rather than an error, so junk
-parses as a valid pin instead of being rejected:
-
-- `"1.x"` (common npm spec) - minor fails to parse - `Version 1.0.0` -
-  `VersionSpec::Pinned(1.0.0)`. A wildcard spec becomes an exact pin, and a
-  rewrite then emits `"==1.4.2"` (see UPD-002).
-- `"1.2.3 - 2.3.4"` (npm hyphen range) - splits at `-`, base `"1.2.3 "` -
-  `Pinned(1.2.0)`.
-
-`from_str` should reject a numeric segment it cannot parse. A missing component
-defaulting to 0 is fine; a malformed one is not.
-
-## VER-006 - Byte index from a lowercased copy is used to slice the original
-
-Reported by core, pcu-parsers, pcu-runtime.
-
-`s.to_lowercase().find(pattern)` produces a byte index into the *lowercased*
-string; `&s[..idx]` / `&s[idx..]` then slice the **original**. Lowercasing is not
-length-preserving in Unicode, so the index can be wrong or land off a char
-boundary - a panic path in a library that parses registry-supplied strings.
-Also allocates a fresh lowercased string once per pattern, nine times per
-version parsed.
+Still true, by a different mechanism than filed: `split_release` now stops at
+`1` and the suffix `"!2.0.0"` is rejected as not a recognised pre-release, so
+the parse still errors and the release is still dropped silently.
 
 ## VER-007 - Cargo's single-`=` exact pin degrades to an unrewritable `Complex`
 
@@ -213,15 +145,6 @@ multi-clause specifier sets all become `Complex`, whose `satisfies` returns
 `false` - i.e. the tool claims the installed version is out of range. See
 VER-008.
 
-## VER-014 - `version_string()` violates its own doc comment
-
-Reported by core.
-
-Documented as "Returns just `1.0.0` instead of `==1.0.0`", but the `Complex(s)`
-arm returns the raw string verbatim, operators included, and `Wildcard` returns
-`"1.2.*"`. Callers in the `ccu` and `ncu` parsers assert on it as if it were a
-bare version.
-
 ## VER-015 - `PartialEq` / `Ord` ignore the local version segment
 
 Reported by pcu-parsers.
@@ -231,22 +154,20 @@ from precedence by design, so this is correct for ccu/ncu and wrong for PEP 440
 local versions, which are ordered - another instance of one struct serving three
 incompatible orderings.)
 
-## VER-016 - `max_major()` has mutually incompatible semantics per variant and no callers
-
-Reported by core.
-
-`Range { max }` returns `max.major` (an *exclusive* bound) while `Caret(v)`
-returns `v.major` (inclusive) and `LessThan(v)` returns `v.major` (exclusive).
-No caller outside `core`. Delete it or define the bound.
-
 ## Structural recommendation, as filed by the hunters
 
 Four of the five hunters independently reached the same conclusion, differing
 only in which replacement they would reach for. The shared diagnosis: `Version`
 hand-rolls a parser that is neither semver nor PEP 440 and gets both wrong, then
 papers over failures with `unwrap_or(0)`; and `pre_release: Option<String>`
-cannot support correct ordering no matter how `Ord` is written. VER-001 through
-VER-006, VER-010 and VER-015 all trace to this.
+cannot support correct ordering no matter how `Ord` is written.
+
+Partly overtaken by events: the strict release/suffix split, structured
+prerelease ordering and the removal of `unwrap_or(0)` have landed in
+`core/src/version.rs`, so the parser is no longer the weak point. What remains
+is the type: `pre_release: Option<String>` still serves three incompatible
+orderings (VER-003, VER-015), there is still no epoch field (VER-004), and
+`is_prerelease` still cannot distinguish a pre-release from a post-release.
 
 - core and pcu argue for one `Version` type carrying an explicit `Ecosystem`
   discriminant, with a real semver path (structured prerelease identifiers,

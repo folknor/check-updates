@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use ncu::cli::Args;
 use ncu::detector::ProjectDetector;
-use ncu::global::{generate_upgrade_commands, GlobalCheck, GlobalPackageDiscovery};
+use ncu::global::{GlobalCheck, GlobalPackageDiscovery, generate_upgrade_commands};
 use ncu::npm::NpmClient;
 use ncu::output::{GlobalTableRenderer, TableRenderer};
 use ncu::parsers::{LockfileParser, PackageJsonParser};
@@ -321,11 +321,15 @@ async fn run_project_mode(args: &Args) -> Result<()> {
         result.print_summary();
 
         if skipped > 0 && !args.force {
-            println!("{skipped} update(s) outside the selected severity were skipped. Run -uf to force upgrade all.");
+            println!(
+                "{skipped} update(s) outside the selected severity were skipped. Run -uf to force upgrade all."
+            );
         }
     } else if !to_render.is_empty() {
         println!();
-        println!("Run -u to upgrade patch, -um to upgrade patch+minors, and -uf to force upgrade all.");
+        println!(
+            "Run -u to upgrade patch, -um to upgrade patch+minors, and -uf to force upgrade all."
+        );
     }
 
     // Show errors at the end

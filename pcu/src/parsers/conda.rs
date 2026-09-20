@@ -1,6 +1,6 @@
 use super::{Dependency, DependencyParser};
-use check_updates_core::VersionSpec;
 use anyhow::{Context, Result};
+use check_updates_core::VersionSpec;
 use serde_yaml::Value;
 use std::fs;
 use std::path::Path;
@@ -120,9 +120,10 @@ impl CondaParser {
 
         for op in &operators {
             if let Some(pos) = dep_str.find(op)
-                && split_pos.is_none_or(|sp| pos < sp) {
-                    split_pos = Some(pos);
-                }
+                && split_pos.is_none_or(|sp| pos < sp)
+            {
+                split_pos = Some(pos);
+            }
         }
 
         if let Some(pos) = split_pos {
@@ -143,8 +144,8 @@ impl CondaParser {
 
 impl DependencyParser for CondaParser {
     fn parse(&self, path: &Path) -> Result<Vec<Dependency>> {
-        let content = fs::read_to_string(path)
-            .context(format!("Failed to read file: {}", path.display()))?;
+        let content =
+            fs::read_to_string(path).context(format!("Failed to read file: {}", path.display()))?;
 
         let yaml: Value = serde_yaml::from_str(&content)
             .context(format!("Failed to parse YAML: {}", path.display()))?;
@@ -169,6 +170,7 @@ impl DependencyParser for CondaParser {
                             line_number,
                             original_line: format!("  - {dep_str}"),
                             manifest_key: None,
+                            section: None,
                         });
                     }
                 } else if let Some(pip_section) = dep.as_mapping() {
@@ -176,16 +178,19 @@ impl DependencyParser for CondaParser {
                     if let Some(pip_deps) = pip_section.get("pip").and_then(|v| v.as_sequence()) {
                         for (pip_idx, pip_dep) in pip_deps.iter().enumerate() {
                             if let Some(pip_dep_str) = pip_dep.as_str()
-                                && let Some((name, version_spec)) = Self::parse_pip_dependency(pip_dep_str) {
-                                    dependencies.push(Dependency {
-                                        name,
-                                        version_spec,
-                                        source_file: path.to_path_buf(),
-                                        line_number: line_number + pip_idx + 1, // Approximate line number
-                                        original_line: format!("    - {pip_dep_str}"),
-                                        manifest_key: None,
-                                    });
-                                }
+                                && let Some((name, version_spec)) =
+                                    Self::parse_pip_dependency(pip_dep_str)
+                            {
+                                dependencies.push(Dependency {
+                                    name,
+                                    version_spec,
+                                    source_file: path.to_path_buf(),
+                                    line_number: line_number + pip_idx + 1, // Approximate line number
+                                    original_line: format!("    - {pip_dep_str}"),
+                                    manifest_key: None,
+                                    section: None,
+                                });
+                            }
                         }
                     }
                 }
@@ -296,7 +301,10 @@ dependencies:
 
         // Check conda dependencies
         let python_dep = dependencies.iter().find(|d| d.name == "python").unwrap();
-        assert!(matches!(python_dep.version_spec, VersionSpec::Wildcard { .. }));
+        assert!(matches!(
+            python_dep.version_spec,
+            VersionSpec::Wildcard { .. }
+        ));
 
         let numpy_dep = dependencies.iter().find(|d| d.name == "numpy").unwrap();
         assert!(matches!(numpy_dep.version_spec, VersionSpec::Pinned(_)));
@@ -304,7 +312,10 @@ dependencies:
         let pandas_dep = dependencies.iter().find(|d| d.name == "pandas").unwrap();
         assert!(matches!(pandas_dep.version_spec, VersionSpec::Minimum(_)));
 
-        let sklearn_dep = dependencies.iter().find(|d| d.name == "scikit-learn").unwrap();
+        let sklearn_dep = dependencies
+            .iter()
+            .find(|d| d.name == "scikit-learn")
+            .unwrap();
         assert!(matches!(sklearn_dep.version_spec, VersionSpec::Any));
 
         // Check pip dependencies

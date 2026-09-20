@@ -127,6 +127,28 @@ correctly left alone. The hunter's rule: anything ncu cannot exactly model
 should become non-rewritable, not a lossy approximation. The lossiness is
 invisible today because `Version::Display` echoes `original`.
 
+Partly overtaken by events, in a way that changes what is left to do. The
+destructive half is closed at the write end: `Version::from_str` is now strict,
+so `1.x`, `1.2.x` and `1.2.3 - 2.3.4` land in `Complex` instead of a bogus
+`Pinned(1.0.0)`, and `ncu/src/updater.rs` refuses to write any spec it cannot
+render as valid npm syntax. A union like `^17 || ^18` is no longer corrupted.
+
+What remains is the *reporting* half, and it is now the whole of this entry,
+in two distinct shapes:
+
+- A spec that parses to `Complex` (`1.x`, a hyphen range) is still resolved,
+  still displayed as checkable with a computed target, and then silently not
+  written. The user is shown an update that `-u` will never apply.
+- A spec that makes `VersionSpec::parse` return `Err` - npm's space-separated
+  AND (`>=1.2.3 <2.0.0`) and `||` unions - is worse: `parse_deps` does
+  `if let Ok(..)`, so the dependency vanishes from the report entirely. Before
+  the strict-parsing change, `>=1.2.3 <2.0.0` at least appeared, as a garbage
+  `Minimum(1.2.0)`.
+
+A real npm range parser is still the fix. Routing the `Err` path to `Complex`
+would at least convert a disappearance into a visible un-actionable row, but
+only the display change makes either honest.
+
 ## DSC-008 - ncu dedups by name globally, dropping workspace members and cross-table duplicates
 
 Reported by ncu.

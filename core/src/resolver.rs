@@ -19,31 +19,20 @@ impl DependencyResolver {
         let latest = package_info.latest.clone();
 
         // Calculate "in range" - latest version that satisfies the constraint
-        let in_range = self.calculate_in_range(
-            &dependency.version_spec,
-            &package_info.versions,
-            installed,
-        );
+        let in_range =
+            self.calculate_in_range(&dependency.version_spec, &package_info.versions, installed);
 
         // Determine the target version for display
         let current = installed.or_else(|| dependency.version_spec.base_version());
 
-        let (target, target_spec) = self.calculate_target(
-            &dependency.version_spec,
-            &in_range,
-            &latest,
-            current,
-        );
+        let (target, target_spec) =
+            self.calculate_target(&dependency.version_spec, &in_range, &latest, current);
 
         // Calculate severity based on current → target
         let severity = Self::calculate_severity(current, target.as_ref());
 
         // Calculate force spec (to absolute latest)
-        let force_spec = self.calculate_force_spec(
-            &dependency.version_spec,
-            &latest,
-            current,
-        );
+        let force_spec = self.calculate_force_spec(&dependency.version_spec, &latest, current);
 
         // Look up registry-published dates for the three versions a consumer
         // might care about. Missing entries stay as None so the JSON stays
@@ -88,14 +77,15 @@ impl DependencyResolver {
 
         // Check if in_range is an update
         if let Some(ir) = in_range
-            && ir > current {
-                let spec = if current_spec.is_rewritable() {
-                    Some(current_spec.with_version(ir))
-                } else {
-                    None
-                };
-                return (Some(ir.clone()), spec);
-            }
+            && ir > current
+        {
+            let spec = if current_spec.is_rewritable() {
+                Some(current_spec.with_version(ir))
+            } else {
+                None
+            };
+            return (Some(ir.clone()), spec);
+        }
 
         // No in-range update, check if latest is an update
         if latest > current {
@@ -199,6 +189,7 @@ mod tests {
             line_number: 1,
             original_line: format!("{name}=={spec_str}"),
             manifest_key: None,
+            section: None,
         }
     }
 

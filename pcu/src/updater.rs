@@ -1,9 +1,9 @@
-use check_updates_core::{DependencyCheck, UpdateSeverity};
 use crate::detector::PackageManager;
 use anyhow::{Context, Result};
-use std::collections::{HashSet, HashMap};
-use std::path::{Path, PathBuf};
+use check_updates_core::{DependencyCheck, UpdateSeverity};
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Updates dependency files with new versions
 pub struct FileUpdater;
@@ -50,25 +50,37 @@ impl FileUpdater {
             };
 
             if let Some(spec) = version_spec
-                && spec.is_rewritable() {
+                && spec.is_rewritable()
+            {
                 let new_version = spec.to_string();
                 file_updates
                     .entry(check.dependency.source_file.clone())
                     .or_default()
                     .push((check, new_version));
-
-                // Track which packages appear in which files
-                package_file_map
-                    .entry(check.dependency.name.clone())
-                    .or_default()
-                    .push(check.dependency.source_file.clone());
             }
         }
 
-        // Update each file
+        // Update each file. `update_file` reports whether the bytes on disk
+        // actually changed; a check whose spec could not be located in its
+        // source line leaves the file untouched and must not be counted as a
+        // modification, so a no-op run leaves the file and its mtime alone.
         for (file_path, updates) in file_updates {
-            self.update_file(&file_path, &updates)
+            let applied = self
+                .update_file(&file_path, &updates)
                 .with_context(|| format!("Failed to update file: {}", file_path.display()))?;
+
+            if applied.is_empty() {
+                continue;
+            }
+
+            // Only packages whose spec was really rewritten count towards the
+            // "updated in multiple files" note.
+            for name in applied {
+                package_file_map
+                    .entry(name)
+                    .or_default()
+                    .push(file_path.clone());
+            }
 
             modified_files.insert(file_path.clone());
 
@@ -99,17 +111,32 @@ impl FileUpdater {
         })
     }
 
-    /// Update a single file with the given dependency updates
-    fn update_file(&self, file_path: &Path, updates: &[(&DependencyCheck, String)]) -> Result<()> {
+    /// Update a single file with the given dependency updates.
+    ///
+    /// Returns the names of the packages whose spec was actually rewritten. An
+    /// empty result means nothing changed and nothing was written.
+    fn update_file(
+        &self,
+        file_path: &Path,
+        updates: &[(&DependencyCheck, String)],
+    ) -> Result<Vec<String>> {
         // Read the entire file
         let content = fs::read_to_string(file_path)
             .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
 
-        let mut lines: Vec<String> = content.lines().map(std::string::ToString::to_string).collect();
+        // Keep each line's own terminator so a CRLF (or mixed, or
+        // newline-at-EOF-less) file round-trips byte for byte on the lines we
+        // do not touch.
+        let mut lines: Vec<SourceLine> = content
+            .split_inclusive('\n')
+            .map(SourceLine::parse)
+            .collect();
 
         // Sort updates by line number in descending order to avoid offset issues
         let mut sorted_updates: Vec<_> = updates.iter().collect();
         sorted_updates.sort_by_key(|x| std::cmp::Reverse(x.0.dependency.line_number));
+
+        let mut applied: Vec<String> = Vec::new();
 
         // Apply each update
         for (check, new_version) in sorted_updates {
@@ -119,35 +146,52 @@ impl FileUpdater {
                 continue; // Skip if line number is out of bounds
             }
 
-            let original_line = &lines[line_idx];
+            let original_line = &lines[line_idx].text;
 
-            let updated_line = self.replace_version_in_line(
+            let Some(updated_line) = self.replace_version_in_line(
                 original_line,
                 &check.dependency.name,
                 &check.dependency.version_spec.to_string(),
                 new_version,
                 file_path,
-            )?;
+            ) else {
+                // Spec not found on the recorded line: report nothing rather
+                // than claiming an update we did not make.
+                continue;
+            };
 
-            lines[line_idx] = updated_line;
+            if updated_line == *original_line {
+                continue;
+            }
+
+            lines[line_idx].text = updated_line;
+            applied.push(check.dependency.name.clone());
         }
 
-        // Write the file back
-        let new_content = lines.join("\n");
-        // Add trailing newline if original had one
-        let new_content = if content.ends_with('\n') {
-            format!("{new_content}\n")
-        } else {
-            new_content
-        };
+        if applied.is_empty() {
+            // No effective change: do not rewrite the file and disturb its mtime.
+            return Ok(Vec::new());
+        }
 
-        fs::write(file_path, new_content)
+        let mut new_content = String::with_capacity(content.len());
+        for line in &lines {
+            new_content.push_str(&line.text);
+            new_content.push_str(line.terminator);
+        }
+
+        write_atomically(file_path, new_content.as_bytes())
             .with_context(|| format!("Failed to write file: {}", file_path.display()))?;
 
-        Ok(())
+        Ok(applied)
     }
 
-    /// Replace version specification in a line
+    /// Replace version specification in a line.
+    ///
+    /// `None` means the spec could not be located on this line; the caller
+    /// must then leave the line alone. There is deliberately no unanchored
+    /// whole-line `str::replace` fallback: it rewrote trailing comments,
+    /// environment markers and unrelated second occurrences of the same
+    /// version string.
     fn replace_version_in_line(
         &self,
         line: &str,
@@ -155,21 +199,18 @@ impl FileUpdater {
         old_spec: &str,
         new_spec: &str,
         file_path: &Path,
-    ) -> Result<String> {
-        let file_name = file_path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+    ) -> Option<String> {
+        let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         // Determine file type and use appropriate replacement strategy
-        if file_name.starts_with("requirements") || file_name.ends_with(".txt") {
-            self.replace_in_requirements(line, package_name, old_spec, new_spec)
-        } else if file_name == "pyproject.toml" {
+        if file_name == "pyproject.toml" {
             self.replace_in_pyproject(line, package_name, old_spec, new_spec)
-        } else if file_name.starts_with("environment.") &&
-                  (file_name.ends_with(".yml") || file_name.ends_with(".yaml")) {
+        } else if file_name.starts_with("environment.")
+            && (file_name.ends_with(".yml") || file_name.ends_with(".yaml"))
+        {
             self.replace_in_conda(line, package_name, old_spec, new_spec)
         } else {
-            // Default to requirements.txt style
+            // requirements.txt style, and the default for anything unknown
             self.replace_in_requirements(line, package_name, old_spec, new_spec)
         }
     }
@@ -181,33 +222,11 @@ impl FileUpdater {
         package_name: &str,
         old_spec: &str,
         new_spec: &str,
-    ) -> Result<String> {
+    ) -> Option<String> {
         // Format: package==1.0.0 or package>=1.0.0,<2.0.0 or package[extras]==1.0.0
-
-        // Try exact match first
-        if let Some(new_line) = line.replace(&format!("{package_name}{old_spec}"),
-                                              &format!("{package_name}{new_spec}"))
-                                    .into()
-            && new_line != line {
-                return Ok(new_line);
-            }
-
-        // Try with brackets (extras)
-        if line.contains('[')
-            && let Some(bracket_start) = line.find('[')
-                && let Some(bracket_end) = line.find(']') {
-                    let before_bracket = &line[..bracket_start];
-                    let extras = &line[bracket_start..=bracket_end];
-                    let after_bracket = &line[bracket_end + 1..];
-
-                    if before_bracket.trim() == package_name {
-                        let new_after = after_bracket.replace(old_spec, new_spec);
-                        return Ok(format!("{before_bracket}{extras}{new_after}"));
-                    }
-                }
-
-        // Fallback: simple string replacement
-        Ok(line.replace(old_spec, new_spec))
+        let (body, comment) = split_comment(line);
+        let new_body = replace_spec_after_name(body, package_name, old_spec, new_spec)?;
+        Some(format!("{new_body}{comment}"))
     }
 
     /// Replace version in pyproject.toml format
@@ -217,32 +236,36 @@ impl FileUpdater {
         package_name: &str,
         old_spec: &str,
         new_spec: &str,
-    ) -> Result<String> {
-        // Format: package = "^1.0.0" or package = {version = "^1.0.0", ...}
+    ) -> Option<String> {
+        let (body, comment) = split_comment(line);
 
-        // Check if line contains the package name (case-insensitive for TOML keys)
-        if line.to_lowercase().contains(&package_name.to_lowercase()) {
-            // Replace the version spec, preserving quotes
-            let result = line.replace(
-                &format!("\"{old_spec}\""),
-                &format!("\"{new_spec}\"")
-            );
-            if result != line {
-                return Ok(result);
-            }
+        // PEP 621 / PEP 508 string form: "requests>=2.28.0",
+        if let Some(new_body) = replace_spec_after_name(body, package_name, old_spec, new_spec) {
+            return Some(format!("{new_body}{comment}"));
+        }
 
-            // Try single quotes
-            let result = line.replace(
-                &format!("'{old_spec}'"),
-                &format!("'{new_spec}'")
-            );
-            if result != line {
-                return Ok(result);
+        // Poetry key form: requests = "^2.28.0" or requests = {version = "^2.28.0", ...}
+        let spec_start = name_anchor_end(body, package_name)?;
+        let rest = &body[spec_start..];
+        if !rest.trim_start().starts_with('=') {
+            return None;
+        }
+        for quote in ['"', '\''] {
+            let needle = format!("{quote}{old_spec}{quote}");
+            if let Some(at) = rest.find(&needle) {
+                let replacement = format!("{quote}{new_spec}{quote}");
+                let new_body = format!(
+                    "{}{}{}{}",
+                    &body[..spec_start],
+                    &rest[..at],
+                    replacement,
+                    &rest[at + needle.len()..]
+                );
+                return Some(format!("{new_body}{comment}"));
             }
         }
 
-        // Fallback
-        Ok(line.replace(old_spec, new_spec))
+        None
     }
 
     /// Replace version in conda environment.yml format
@@ -252,34 +275,164 @@ impl FileUpdater {
         package_name: &str,
         old_spec: &str,
         new_spec: &str,
-    ) -> Result<String> {
+    ) -> Option<String> {
         // Format: - package==1.0.0 or - package=1.0.0
+        let (body, comment) = split_comment(line);
 
-        // Conda uses = instead of == sometimes
+        if let Some(new_body) = replace_spec_after_name(body, package_name, old_spec, new_spec) {
+            return Some(format!("{new_body}{comment}"));
+        }
+
+        // Conda uses a single `=` where pip uses `==`
         let conda_old_spec = old_spec.replace("==", "=");
         let conda_new_spec = new_spec.replace("==", "=");
-
-        // Try with ==
-        let result = line.replace(
-            &format!("{package_name}{old_spec}"),
-            &format!("{package_name}{new_spec}")
-        );
-        if result != line {
-            return Ok(result);
+        if conda_old_spec == old_spec {
+            return None;
         }
-
-        // Try with single =
-        let result = line.replace(
-            &format!("{package_name}{conda_old_spec}"),
-            &format!("{package_name}{conda_new_spec}")
-        );
-        if result != line {
-            return Ok(result);
-        }
-
-        // Fallback
-        Ok(line.replace(old_spec, new_spec))
+        let new_body =
+            replace_spec_after_name(body, package_name, &conda_old_spec, &conda_new_spec)?;
+        Some(format!("{new_body}{comment}"))
     }
+}
+
+/// One physical line plus the terminator it carried in the source file.
+struct SourceLine {
+    text: String,
+    terminator: &'static str,
+}
+
+impl SourceLine {
+    fn parse(chunk: &str) -> Self {
+        if let Some(rest) = chunk.strip_suffix("\r\n") {
+            Self {
+                text: rest.to_string(),
+                terminator: "\r\n",
+            }
+        } else if let Some(rest) = chunk.strip_suffix('\n') {
+            Self {
+                text: rest.to_string(),
+                terminator: "\n",
+            }
+        } else {
+            Self {
+                text: chunk.to_string(),
+                terminator: "",
+            }
+        }
+    }
+}
+
+/// Split a line into its payload and its trailing comment (including the
+/// whitespace that preceded the `#`). A `#` only starts a comment at the start
+/// of the line or after whitespace, which keeps `...#egg=name` URL fragments
+/// and `#`-bearing markers intact.
+fn split_comment(line: &str) -> (&str, &str) {
+    let bytes = line.as_bytes();
+    for (idx, byte) in bytes.iter().enumerate() {
+        if *byte != b'#' {
+            continue;
+        }
+        if idx == 0 || bytes[idx - 1].is_ascii_whitespace() {
+            let cut = line[..idx].trim_end_matches([' ', '\t']).len();
+            return (&line[..cut], &line[cut..]);
+        }
+    }
+    (line, "")
+}
+
+fn is_name_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '-' | '_' | '.')
+}
+
+/// Find the byte offset just past an occurrence of `name` (and any `[extras]`
+/// suffix) that is a whole token - not a substring of a longer package name.
+fn name_anchor_end(body: &str, name: &str) -> Option<usize> {
+    if name.is_empty() {
+        return None;
+    }
+    // `to_ascii_lowercase` preserves byte length, so offsets stay valid.
+    let haystack = body.to_ascii_lowercase();
+    let needle = name.to_ascii_lowercase();
+    let mut from = 0;
+
+    while let Some(rel) = haystack[from..].find(&needle) {
+        let start = from + rel;
+        let end = start + needle.len();
+        let before_ok = !body[..start].chars().next_back().is_some_and(is_name_char);
+        let after = &body[end..];
+        let after_ok = !after.chars().next().is_some_and(is_name_char);
+
+        if before_ok && after_ok {
+            if let Some(close) = after.strip_prefix('[').and_then(|r| r.find(']')) {
+                return Some(end + close + 2);
+            }
+            return Some(end);
+        }
+        from = end;
+    }
+
+    None
+}
+
+/// Replace `old_spec` with `new_spec` exactly where it sits directly after the
+/// package name (optionally separated by whitespace). Returns `None` when the
+/// name or the spec is not where it was claimed to be.
+fn replace_spec_after_name(
+    body: &str,
+    name: &str,
+    old_spec: &str,
+    new_spec: &str,
+) -> Option<String> {
+    if old_spec.is_empty() {
+        return None;
+    }
+    let pos = name_anchor_end(body, name)?;
+    let rest = &body[pos..];
+    let gap = rest.len() - rest.trim_start().len();
+    let after_gap = &rest[gap..];
+
+    if !after_gap.starts_with(old_spec) {
+        return None;
+    }
+
+    Some(format!(
+        "{}{}{}{}",
+        &body[..pos],
+        &rest[..gap],
+        new_spec,
+        &after_gap[old_spec.len()..]
+    ))
+}
+
+/// Write `bytes` to `path` by way of a sibling temporary file and a rename, so
+/// an interrupted or failed write cannot leave a truncated manifest behind.
+/// The rename is same-directory, hence atomic on every supported platform.
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("manifest");
+    let tmp_path = dir.join(format!(".{file_name}.pcu-{}.tmp", std::process::id()));
+
+    let result = (|| -> Result<()> {
+        fs::write(&tmp_path, bytes)
+            .with_context(|| format!("Failed to write temporary file: {}", tmp_path.display()))?;
+
+        // Preserve the original file's permissions where we can read them.
+        if let Ok(meta) = fs::metadata(path) {
+            let _ = fs::set_permissions(&tmp_path, meta.permissions());
+        }
+
+        fs::rename(&tmp_path, path)
+            .with_context(|| format!("Failed to replace file: {}", path.display()))
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+
+    result
 }
 
 /// Detect package manager from file path
@@ -292,8 +445,9 @@ fn detect_package_manager(path: &Path) -> Option<PackageManager> {
         // We'd need to read the file to determine if it's uv, poetry, or pdm
         // For now, default to uv as it's the most common
         Some(PackageManager::Uv)
-    } else if file_name.starts_with("environment.") &&
-              (file_name.ends_with(".yml") || file_name.ends_with(".yaml")) {
+    } else if file_name.starts_with("environment.")
+        && (file_name.ends_with(".yml") || file_name.ends_with(".yaml"))
+    {
         Some(PackageManager::Conda)
     } else if file_name == "uv.lock" {
         Some(PackageManager::Uv)
@@ -358,30 +512,31 @@ mod tests {
         let updater = FileUpdater::new();
 
         // Test basic pinned version
-        let result = updater.replace_in_requirements(
-            "requests==2.28.0",
-            "requests",
-            "==2.28.0",
-            "==2.32.3"
-        ).unwrap();
+        let result = updater
+            .replace_in_requirements("requests==2.28.0", "requests", "==2.28.0", "==2.32.3")
+            .unwrap();
         assert_eq!(result, "requests==2.32.3");
 
         // Test range version
-        let result = updater.replace_in_requirements(
-            "numpy>=1.24.0,<2.0.0",
-            "numpy",
-            ">=1.24.0,<2.0.0",
-            ">=1.26.0,<2.0.0"
-        ).unwrap();
+        let result = updater
+            .replace_in_requirements(
+                "numpy>=1.24.0,<2.0.0",
+                "numpy",
+                ">=1.24.0,<2.0.0",
+                ">=1.26.0,<2.0.0",
+            )
+            .unwrap();
         assert_eq!(result, "numpy>=1.26.0,<2.0.0");
 
         // Test with extras
-        let result = updater.replace_in_requirements(
-            "requests[security]==2.28.0",
-            "requests",
-            "==2.28.0",
-            "==2.32.3"
-        ).unwrap();
+        let result = updater
+            .replace_in_requirements(
+                "requests[security]==2.28.0",
+                "requests",
+                "==2.28.0",
+                "==2.32.3",
+            )
+            .unwrap();
         assert_eq!(result, "requests[security]==2.32.3");
     }
 
@@ -390,21 +545,15 @@ mod tests {
         let updater = FileUpdater::new();
 
         // Test with double quotes
-        let result = updater.replace_in_pyproject(
-            "requests = \"^2.28.0\"",
-            "requests",
-            "^2.28.0",
-            "^2.32.3"
-        ).unwrap();
+        let result = updater
+            .replace_in_pyproject("requests = \"^2.28.0\"", "requests", "^2.28.0", "^2.32.3")
+            .unwrap();
         assert_eq!(result, "requests = \"^2.32.3\"");
 
         // Test with single quotes
-        let result = updater.replace_in_pyproject(
-            "numpy = '^1.24.0'",
-            "numpy",
-            "^1.24.0",
-            "^1.26.0"
-        ).unwrap();
+        let result = updater
+            .replace_in_pyproject("numpy = '^1.24.0'", "numpy", "^1.24.0", "^1.26.0")
+            .unwrap();
         assert_eq!(result, "numpy = '^1.26.0'");
     }
 
@@ -413,22 +562,193 @@ mod tests {
         let updater = FileUpdater::new();
 
         // Test with == operator
-        let result = updater.replace_in_conda(
-            "  - numpy==1.24.0",
-            "numpy",
-            "==1.24.0",
-            "==1.26.0"
-        ).unwrap();
+        let result = updater
+            .replace_in_conda("  - numpy==1.24.0", "numpy", "==1.24.0", "==1.26.0")
+            .unwrap();
         assert_eq!(result, "  - numpy==1.26.0");
 
         // Test with single = operator
-        let result = updater.replace_in_conda(
-            "  - requests=2.28.0",
-            "requests",
-            "==2.28.0",
-            "==2.32.3"
-        ).unwrap();
+        let result = updater
+            .replace_in_conda("  - requests=2.28.0", "requests", "==2.28.0", "==2.32.3")
+            .unwrap();
         assert_eq!(result, "  - requests=2.32.3");
+    }
+
+    #[test]
+    fn test_replace_preserves_trailing_comment() {
+        let updater = FileUpdater::new();
+
+        // The old unanchored fallback rewrote the trailing comment too.
+        let result = updater
+            .replace_in_requirements(
+                "flask==2.0.3  # pin matches 2.0.3 in docs",
+                "flask",
+                "==2.0.3",
+                "==2.3.3",
+            )
+            .unwrap();
+        assert_eq!(result, "flask==2.3.3  # pin matches 2.0.3 in docs");
+    }
+
+    #[test]
+    fn test_replace_does_not_touch_environment_marker() {
+        let updater = FileUpdater::new();
+
+        let result = updater
+            .replace_in_requirements(
+                "backports==1.0.0 ; python_version < \"1.0.0\"",
+                "backports",
+                "==1.0.0",
+                "==1.0.1",
+            )
+            .unwrap();
+        assert_eq!(result, "backports==1.0.1 ; python_version < \"1.0.0\"");
+    }
+
+    #[test]
+    fn test_replace_requires_the_named_package() {
+        let updater = FileUpdater::new();
+
+        // `requests` must not anchor on `requests-oauthlib`.
+        assert!(
+            updater
+                .replace_in_requirements(
+                    "requests-oauthlib==2.28.0",
+                    "requests",
+                    "==2.28.0",
+                    "==2.32.3",
+                )
+                .is_none()
+        );
+
+        // A spec the parser normalised differently is reported as not found
+        // rather than silently skipped while claiming success.
+        assert!(updater.replace_in_requirements(
+            "numpy >= 1.0, < 2.0",
+            "numpy",
+            ">=1.0,<2.0",
+            ">=1.5,<2.0",
+        ).is_none());
+    }
+
+    #[test]
+    fn test_replace_in_pyproject_pep621_string() {
+        let updater = FileUpdater::new();
+
+        let result = updater
+            .replace_in_pyproject(
+                "    \"requests>=2.28.0\",",
+                "requests",
+                ">=2.28.0",
+                ">=2.32.3",
+            )
+            .unwrap();
+        assert_eq!(result, "    \"requests>=2.32.3\",");
+    }
+
+    #[test]
+    fn test_replace_in_pyproject_inline_table() {
+        let updater = FileUpdater::new();
+
+        let result = updater
+            .replace_in_pyproject(
+                "requests = { version = \"^2.28.0\", optional = true }",
+                "requests",
+                "^2.28.0",
+                "^2.32.3",
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            "requests = { version = \"^2.32.3\", optional = true }"
+        );
+    }
+
+    #[test]
+    fn test_crlf_line_endings_survive() -> Result<()> {
+        use crate::parsers::Dependency;
+        use check_updates_core::{Version, VersionSpec};
+
+        let mut file = NamedTempFile::new()?;
+        file.write_all(b"# deps\r\nrequests==2.28.0\r\nnumpy==1.24.0\r\n")?;
+        file.flush()?;
+        let temp_path = file.path().to_path_buf();
+
+        let check = DependencyCheck {
+            dependency: Dependency {
+                name: "requests".to_string(),
+                version_spec: VersionSpec::Pinned(Version::new(2, 28, 0)),
+                source_file: temp_path.clone(),
+                line_number: 2,
+                original_line: "requests==2.28.0".to_string(),
+                manifest_key: None,
+                section: None,
+            },
+            installed: Some(Version::new(2, 28, 0)),
+            in_range: Some(Version::new(2, 32, 3)),
+            latest: Version::new(2, 32, 3),
+            target: Some(Version::new(2, 32, 3)),
+            target_spec: Some(VersionSpec::Pinned(Version::new(2, 32, 3))),
+            severity: Some(UpdateSeverity::Minor),
+            force_spec: Some(VersionSpec::Pinned(Version::new(2, 32, 3))),
+            installed_released_at: None,
+            target_released_at: None,
+            latest_released_at: None,
+        };
+
+        let updater = FileUpdater::new();
+        updater.update_file(&temp_path, &[(&check, "==2.32.3".to_string())])?;
+
+        let content = fs::read_to_string(&temp_path)?;
+        assert_eq!(content, "# deps\r\nrequests==2.32.3\r\nnumpy==1.24.0\r\n");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_no_match_reports_no_modified_file() -> Result<()> {
+        use crate::parsers::Dependency;
+        use check_updates_core::{Version, VersionSpec};
+
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "requests==2.28.0")?;
+        file.flush()?;
+        let temp_path = file.path().to_path_buf();
+        let before = fs::read_to_string(&temp_path)?;
+
+        // Line number points past the end of the file.
+        let check = DependencyCheck {
+            dependency: Dependency {
+                name: "requests".to_string(),
+                version_spec: VersionSpec::Pinned(Version::new(2, 28, 0)),
+                source_file: temp_path.clone(),
+                line_number: 99,
+                original_line: "requests==2.28.0".to_string(),
+                manifest_key: None,
+                section: None,
+            },
+            installed: Some(Version::new(2, 28, 0)),
+            in_range: Some(Version::new(2, 28, 1)),
+            latest: Version::new(2, 28, 1),
+            target: Some(Version::new(2, 28, 1)),
+            target_spec: Some(VersionSpec::Pinned(Version::new(2, 28, 1))),
+            severity: Some(UpdateSeverity::Patch),
+            force_spec: Some(VersionSpec::Pinned(Version::new(2, 28, 1))),
+            installed_released_at: None,
+            target_released_at: None,
+            latest_released_at: None,
+        };
+
+        let updater = FileUpdater::new();
+        let result = updater.apply_updates(&[check], false, false)?;
+
+        assert!(
+            result.modified_files.is_empty(),
+            "nothing was written, so nothing may be reported"
+        );
+        assert_eq!(fs::read_to_string(&temp_path)?, before);
+
+        Ok(())
     }
 
     #[test]
@@ -484,6 +804,7 @@ mod tests {
                 line_number: 1,
                 original_line: "requests==2.28.0".to_string(),
                 manifest_key: None,
+                section: None,
             },
             installed: Some(Version::new(2, 28, 0)),
             in_range: Some(Version::new(2, 32, 3)),
@@ -504,6 +825,7 @@ mod tests {
                 line_number: 3,
                 original_line: "flask==2.0.3".to_string(),
                 manifest_key: None,
+                section: None,
             },
             installed: Some(Version::new(2, 0, 3)),
             in_range: Some(Version::new(2, 3, 3)),
@@ -559,6 +881,7 @@ mod tests {
                     line_number: 1,
                     original_line: "serde==1.0.0".to_string(),
                     manifest_key: None,
+                    section: None,
                 },
                 installed: Some(Version::new(1, 0, 0)),
                 in_range: Some(Version::new(1, 0, 200)),
@@ -579,6 +902,7 @@ mod tests {
                     line_number: 2,
                     original_line: "tokio==1.0.0".to_string(),
                     manifest_key: None,
+                    section: None,
                 },
                 installed: Some(Version::new(1, 0, 0)),
                 in_range: Some(Version::new(1, 5, 0)),
@@ -597,8 +921,14 @@ mod tests {
         updater.apply_updates(&checks, false, false)?; // patch only
 
         let content = fs::read_to_string(&temp_path)?;
-        assert!(content.contains("==1.0.200"), "serde should be updated: {content}");
-        assert!(!content.contains("==1.5.0"), "tokio should NOT be updated: {content}");
+        assert!(
+            content.contains("==1.0.200"),
+            "serde should be updated: {content}"
+        );
+        assert!(
+            !content.contains("==1.5.0"),
+            "tokio should NOT be updated: {content}"
+        );
 
         Ok(())
     }
@@ -624,6 +954,7 @@ mod tests {
                     line_number: 1,
                     original_line: "serde==1.0.0".to_string(),
                     manifest_key: None,
+                    section: None,
                 },
                 installed: Some(Version::new(1, 0, 0)),
                 in_range: Some(Version::new(1, 0, 200)),
@@ -644,6 +975,7 @@ mod tests {
                     line_number: 2,
                     original_line: "tokio==1.0.0".to_string(),
                     manifest_key: None,
+                    section: None,
                 },
                 installed: Some(Version::new(1, 0, 0)),
                 in_range: Some(Version::new(1, 5, 0)),
@@ -662,8 +994,14 @@ mod tests {
         updater.apply_updates(&checks, true, false)?; // patch + minor
 
         let content = fs::read_to_string(&temp_path)?;
-        assert!(content.contains("==1.0.200"), "serde should be updated: {content}");
-        assert!(content.contains("==1.5.0"), "tokio should be updated: {content}");
+        assert!(
+            content.contains("==1.0.200"),
+            "serde should be updated: {content}"
+        );
+        assert!(
+            content.contains("==1.5.0"),
+            "tokio should be updated: {content}"
+        );
 
         Ok(())
     }

@@ -59,7 +59,11 @@ impl GlobalTableRenderer {
     }
 
     fn render_group_rows(&self, checks: &[&GlobalCheck]) {
-        let max_name = checks.iter().map(|c| c.package.name.len()).max().unwrap_or(0);
+        let max_name = checks
+            .iter()
+            .map(|c| c.package.name.len())
+            .max()
+            .unwrap_or(0);
         let max_installed = checks
             .iter()
             .map(|c| c.package.installed_version.to_string().len())

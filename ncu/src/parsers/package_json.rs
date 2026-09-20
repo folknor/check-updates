@@ -20,24 +20,13 @@ impl PackageJsonParser {
 
         let mut deps = Vec::new();
 
-        // Parse dependencies
-        if let Some(dependencies) = parsed.get("dependencies").and_then(|v| v.as_object()) {
-            deps.extend(self.parse_deps(dependencies, path, &content));
-        }
-
-        // Parse devDependencies
-        if let Some(dev_deps) = parsed.get("devDependencies").and_then(|v| v.as_object()) {
-            deps.extend(self.parse_deps(dev_deps, path, &content));
-        }
-
-        // Parse peerDependencies
-        if let Some(peer_deps) = parsed.get("peerDependencies").and_then(|v| v.as_object()) {
-            deps.extend(self.parse_deps(peer_deps, path, &content));
-        }
-
-        // Parse optionalDependencies
-        if let Some(opt_deps) = parsed.get("optionalDependencies").and_then(|v| v.as_object()) {
-            deps.extend(self.parse_deps(opt_deps, path, &content));
+        // Each section is parsed under its own name so that the resulting
+        // `Dependency` records which table it came from; the updater needs that
+        // to avoid writing a `dependencies` bump into `peerDependencies`.
+        for section in SECTIONS {
+            if let Some(table) = parsed.get(section).and_then(|v| v.as_object()) {
+                deps.extend(self.parse_deps(table, section, path, &content));
+            }
         }
 
         Ok(deps)
@@ -46,6 +35,7 @@ impl PackageJsonParser {
     fn parse_deps(
         &self,
         deps: &serde_json::Map<String, serde_json::Value>,
+        section: &str,
         source_file: &Path,
         content: &str,
     ) -> Vec<Dependency> {
@@ -65,7 +55,7 @@ impl PackageJsonParser {
                 }
 
                 if let Ok(version_spec) = Self::parse_npm_version(version_str) {
-                    let line_number = Self::find_line_number(content, name);
+                    let line_number = Self::find_line_number(content, section, name);
                     let original_line = content
                         .lines()
                         .nth(line_number.saturating_sub(1))
@@ -79,6 +69,7 @@ impl PackageJsonParser {
                         line_number,
                         original_line,
                         manifest_key: None,
+                        section: Some(section.to_string()),
                     });
                 }
             }
@@ -96,15 +87,45 @@ impl PackageJsonParser {
         VersionSpec::parse(s).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
-    fn find_line_number(content: &str, package_name: &str) -> usize {
+    /// Best-effort line number of `package_name` inside `section`.
+    ///
+    /// The previous version scanned the whole file for the first `"name"`
+    /// occurrence, so a package listed in both `dependencies` and
+    /// `peerDependencies` reported the same line twice. Scanning starts at the
+    /// section header instead. This is still textual and still approximate -
+    /// it is display/diagnostic data, not what the updater edits.
+    fn find_line_number(content: &str, section: &str, package_name: &str) -> usize {
+        let section_header = format!("\"{section}\"");
+        let key = format!("\"{package_name}\"");
+        let mut in_section = false;
+
         for (i, line) in content.lines().enumerate() {
-            if line.contains(&format!("\"{package_name}\"")) {
+            if !in_section {
+                if line.contains(&section_header) {
+                    in_section = true;
+                }
+                continue;
+            }
+            if line.contains(&key) {
                 return i + 1;
             }
+            // A closing brace at the start of the trimmed line ends the table.
+            if line.trim_start().starts_with('}') {
+                break;
+            }
         }
+
         1
     }
 }
+
+/// package.json dependency tables ncu reads and writes, in file-conventional order.
+pub const SECTIONS: [&str; 4] = [
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+];
 
 impl Default for PackageJsonParser {
     fn default() -> Self {
@@ -166,6 +187,43 @@ mod tests {
 
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].name, "express");
+
+        Ok(())
+    }
+
+    #[test]
+    fn same_package_in_two_sections_keeps_its_own_section_and_line() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        writeln!(
+            file,
+            r#"{{
+  "dependencies": {{
+    "react": "^18.0.0"
+  }},
+  "peerDependencies": {{
+    "react": "^17.0.0"
+  }}
+}}"#
+        )?;
+
+        let parser = PackageJsonParser::new();
+        let deps = parser.parse(file.path())?;
+
+        let runtime = deps
+            .iter()
+            .find(|d| d.section.as_deref() == Some("dependencies"))
+            .unwrap();
+        let peer = deps
+            .iter()
+            .find(|d| d.section.as_deref() == Some("peerDependencies"))
+            .unwrap();
+
+        assert_eq!(runtime.name, "react");
+        assert_eq!(peer.name, "react");
+        assert_ne!(
+            runtime.line_number, peer.line_number,
+            "each section entry must point at its own line"
+        );
 
         Ok(())
     }

@@ -146,11 +146,17 @@ mod tests {
         let packages = discovery.parse_npm_global_json(json).expect("should parse");
         assert_eq!(packages.len(), 3);
 
-        let ts = packages.iter().find(|p| p.name == "typescript").expect("should find typescript");
+        let ts = packages
+            .iter()
+            .find(|p| p.name == "typescript")
+            .expect("should find typescript");
         assert_eq!(ts.installed_version.to_string(), "5.4.5");
         assert_eq!(ts.source, GlobalSource::Npm);
 
-        let angular = packages.iter().find(|p| p.name == "@angular/cli").expect("should find @angular/cli");
+        let angular = packages
+            .iter()
+            .find(|p| p.name == "@angular/cli")
+            .expect("should find @angular/cli");
         assert_eq!(angular.installed_version.to_string(), "17.3.8");
     }
 

@@ -47,11 +47,7 @@ impl ProjectDetector {
             let excludes: Vec<&str> = workspace
                 .get("exclude")
                 .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .collect()
-                })
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
                 .unwrap_or_default();
 
             if let Some(members) = workspace.get("members").and_then(|v| v.as_array()) {
@@ -93,9 +89,8 @@ impl ProjectDetector {
                 .with_context(|| format!("Invalid workspace member glob pattern: {pattern}"))?;
 
             for entry in paths {
-                let path = entry.with_context(|| {
-                    format!("Error reading glob match for pattern: {pattern}")
-                })?;
+                let path = entry
+                    .with_context(|| format!("Error reading glob match for pattern: {pattern}"))?;
                 if path.exists() {
                     results.push(path);
                 }
@@ -204,7 +199,10 @@ mod tests {
     #[test]
     fn test_detect_single_crate() -> Result<()> {
         let tmp = TempDir::new()?;
-        create_cargo_toml(tmp.path(), "[package]\nname = \"foo\"\nversion = \"0.1.0\"\n");
+        create_cargo_toml(
+            tmp.path(),
+            "[package]\nname = \"foo\"\nversion = \"0.1.0\"\n",
+        );
         let detector = ProjectDetector::new(tmp.path().to_path_buf());
         let detected = detector.detect()?;
         assert_eq!(detected.len(), 1);
@@ -302,7 +300,12 @@ mod tests {
         let detector = ProjectDetector::new(tmp.path().to_path_buf());
         let detected = detector.detect()?;
         // root + core + desktop (target/ and .hidden/ skipped)
-        assert_eq!(detected.len(), 3, "detected: {:?}", detected.iter().map(|d| &d.path).collect::<Vec<_>>());
+        assert_eq!(
+            detected.len(),
+            3,
+            "detected: {:?}",
+            detected.iter().map(|d| &d.path).collect::<Vec<_>>()
+        );
         Ok(())
     }
 

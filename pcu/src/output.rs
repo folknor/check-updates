@@ -38,10 +38,7 @@ impl GlobalTableRenderer {
                         .python_version
                         .clone()
                         .unwrap_or_else(|| "unknown".to_string());
-                    pip_by_python
-                        .entry(py_version)
-                        .or_default()
-                        .push(check);
+                    pip_by_python.entry(py_version).or_default().push(check);
                 }
             }
         }
@@ -93,7 +90,11 @@ impl GlobalTableRenderer {
 
     fn render_group_rows(&self, checks: &[&GlobalCheck]) {
         // Calculate widths
-        let max_name = checks.iter().map(|c| c.package.name.len()).max().unwrap_or(0);
+        let max_name = checks
+            .iter()
+            .map(|c| c.package.name.len())
+            .max()
+            .unwrap_or(0);
         let max_installed = checks
             .iter()
             .map(|c| c.package.installed_version.to_string().len())

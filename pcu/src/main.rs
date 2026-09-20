@@ -1,12 +1,11 @@
 use anyhow::Result;
+use check_updates_core::{DependencyCheck, DependencyResolver};
 use clap::Parser;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use pcu::cli::Args;
 use pcu::detector::ProjectDetector;
-use pcu::global::{
-    generate_upgrade_commands, GlobalCheck, GlobalPackageDiscovery, UpgradeCommand,
-};
+use pcu::global::{GlobalCheck, GlobalPackageDiscovery, UpgradeCommand, generate_upgrade_commands};
 use pcu::output::{GlobalTableRenderer, TableRenderer, UvPythonTableRenderer};
 use pcu::parsers::{
     CondaParser, DependencyParser, LockfileParser, PyProjectParser, RequirementsParser,
@@ -14,8 +13,7 @@ use pcu::parsers::{
 use pcu::pypi::PyPiClient;
 use pcu::python::get_python_info;
 use pcu::updater::FileUpdater;
-use pcu::uv_python::{generate_uv_python_upgrade_commands, UvPythonCheck, UvPythonDiscovery};
-use check_updates_core::{DependencyCheck, DependencyResolver};
+use pcu::uv_python::{UvPythonCheck, UvPythonDiscovery, generate_uv_python_upgrade_commands};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -23,7 +21,10 @@ const SCHEMA_VERSION: u32 = 1;
 const TOOL_NAME: &str = "pcu";
 
 fn errors_to_json(errors: &[String]) -> Vec<serde_json::Value> {
-    errors.iter().map(|e| serde_json::json!({"message": e})).collect()
+    errors
+        .iter()
+        .map(|e| serde_json::json!({"message": e}))
+        .collect()
 }
 
 fn emit_json_project(checks: &[DependencyCheck], errors: &[String]) -> Result<()> {
@@ -78,10 +79,9 @@ async fn run_global_mode(args: &Args) -> Result<()> {
     let discovery = GlobalPackageDiscovery::new(args.pre_release);
     let uv_python_discovery = UvPythonDiscovery::new();
     let python_info = get_python_info(true);
-    let (packages, uv_python_checks) = tokio::join!(
-        async { discovery.discover() },
-        async { uv_python_discovery.discover_and_check().await }
-    );
+    let (packages, uv_python_checks) = tokio::join!(async { discovery.discover() }, async {
+        uv_python_discovery.discover_and_check().await
+    });
 
     // Print Python version header (suppress in JSON mode)
     if !args.json
@@ -192,11 +192,12 @@ async fn run_global_mode(args: &Args) -> Result<()> {
 
     // 4b. Display uv Python version checks
     if let Ok(uv_checks) = &uv_python_checks
-        && !uv_checks.is_empty() {
-            println!();
-            let uv_renderer = UvPythonTableRenderer::new(true);
-            uv_renderer.render(uv_checks);
-        }
+        && !uv_checks.is_empty()
+    {
+        println!();
+        let uv_renderer = UvPythonTableRenderer::new(true);
+        uv_renderer.render(uv_checks);
+    }
 
     // 5. Print upgrade commands
     let mut commands = generate_upgrade_commands(&checks);
@@ -313,10 +314,12 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     // Fetch package info and Python version
     let python_info = get_python_info(true);
-    let pypi_result = pypi_client.get_packages(&package_names, move |current, _total| {
-        let pb = progress_bar_clone.lock().expect("lock poisoned");
-        pb.set_position(current as u64);
-    }).await;
+    let pypi_result = pypi_client
+        .get_packages(&package_names, move |current, _total| {
+            let pb = progress_bar_clone.lock().expect("lock poisoned");
+            pb.set_position(current as u64);
+        })
+        .await;
 
     let pypi_result = pypi_result?;
     let package_infos = pypi_result.packages;
@@ -380,7 +383,10 @@ async fn run_project_mode(args: &Args) -> Result<()> {
             let key = format!(
                 "{}:{}",
                 c.dependency.name,
-                c.target.as_ref().map(std::string::ToString::to_string).unwrap_or_default()
+                c.target
+                    .as_ref()
+                    .map(std::string::ToString::to_string)
+                    .unwrap_or_default()
             );
             seen.insert(key)
         })

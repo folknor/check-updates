@@ -1,5 +1,5 @@
-use check_updates_core::Version;
 use anyhow::{Context, Result};
+use check_updates_core::Version;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;

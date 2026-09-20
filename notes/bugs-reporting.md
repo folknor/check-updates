@@ -65,37 +65,47 @@ completions arrive out of order, so `pb.set_position` jumps backwards (40 -> 7
 -> 41) and the final position is whichever task finished last rather than
 `total`. Should be a shared `AtomicUsize::fetch_add`.
 
-## RPT-005 - Non-GitHub git installs are reported as up to date
+## RPT-005 - An unknown git-install check is not surfaced to the user
 
-Reported by ccu.
+Reported by ccu. Narrowed: the lying half is fixed in `ccu/src/global.rs`.
+`parse_github_url` now accepts only github.com forms, `GitStatus` and
+`PathStatus` carry `unknown`, every git- and path-sourced package gets an entry
+inserted whatever happens, and `GlobalCheck::check_failed` suppresses the
+severity. A non-GitHub remote, a transport failure, a 404 and a 403/429 rate
+limit all now resolve to "unknown" rather than "up to date".
 
-`ccu/src/global.rs::parse_github_url` takes the last two `/`-separated segments
-of *any* URL, so `https://gitlab.com/o/r`, `https://codeberg.org/o/r`, a
-self-hosted gitea and `https://git.sr.ht/~user/repo` all yield an
-`(owner, repo)` and get sent to `https://api.github.com/repos/...`.
-`check_github_repo` returns `None` on non-success, `check_git_updates` then
-omits the package from its map, and `run_global_mode` pushes a `GlobalCheck`
-with `has_update: false` - a non-GitHub git install is reported as up to date
-rather than as unknown. There is no "could not determine" state in `GlobalCheck`
-at all. The same silent-success-by-omission applies to GitHub rate limiting
-(unauthenticated compare API, no token, no 403/429 handling).
+`ccu/src/output.rs::render_commits_group` now renders those rows as
+`could not check` instead of filtering them out, so the state reaches the user.
 
-## RPT-006 - Global mode's "concurrent" work is strictly serial and blocks the runtime
+Two pieces of residue:
 
-Reported by ccu and pcu-runtime.
+- Path installs have the same defect one layer down. `check_local_git_repo`
+  treats a failing `git rev-list HEAD..@{upstream}` - no upstream configured, or
+  an offline fetch - as `commits_behind: 0, unknown: false`, i.e. current. Only
+  a `rev-parse HEAD` failure is marked unknown.
+- The GitHub compare API is still called unauthenticated - 60 requests/hour
+  shared per IP - so a user with more than a handful of git installs now gets
+  a table full of honest "unknown" instead of a table full of wrong "up to
+  date". Reading `GITHUB_TOKEN` / `GH_TOKEN` would make the feature usable.
 
-- ccu: `check_path_updates` is a synchronous function that shells out to
-  `git fetch` for every path install, serially, on the async runtime thread,
-  *before* the progress bar exists - with no timeout, so it hangs on any
-  unreachable remote. `check_git_updates` is likewise a sequential `for` loop of
-  awaits despite sitting in `tokio::join!`, and bumps the bar to `len` only once,
-  at the very end.
-- pcu: both arms of `tokio::join!` in `run_global_mode` are
-  `async { <blocking sync call> }`, and `get_python_info(true)` is called
-  synchronously before the join. Three subprocess trees run strictly serially on
-  the runtime thread. The comment says "concurrently".
+## RPT-006 - pcu global mode's "concurrent" work is strictly serial
 
-Either `spawn_blocking` them or make them genuinely async.
+Reported by ccu and pcu-runtime. Narrowed: the ccu half is fixed.
+`check_path_updates` is async and fans out over `spawn_blocking`;
+`check_git_updates` runs concurrently under a 5-permit semaphore and reports
+completions through a shared `AtomicUsize`.
+
+The pcu half stands: both arms of `tokio::join!` in `run_global_mode` are
+`async { <blocking sync call> }`, and `get_python_info(true)` is called
+synchronously before the join, so three subprocess trees run strictly serially
+on the runtime thread while the comment says "concurrently".
+
+Note for whoever takes the ccu side further: there is no hard wall-clock
+timeout on `git fetch`, because the workspace enables tokio's
+`rt-multi-thread, macros, sync` only - no `time`, no `process`. The current
+mitigation is git's own knobs (`http.lowSpeedLimit`/`lowSpeedTime`,
+`GIT_TERMINAL_PROMPT=0`, `ssh -o BatchMode=yes -o ConnectTimeout=10`). A real
+timeout means adding those two tokio features.
 
 ## RPT-007 - npm `latest` ignores the prerelease filter, and a total parse failure reads as "up to date"
 
@@ -207,24 +217,47 @@ In project mode `-m` is "patch + minor" (a severity filter). In global mode
 restriction. And `if args.minor` is checked before force, so `pcu -g -mf`
 silently ignores `-f`.
 
-## RPT-014 - ccu's global upgrade commands are wrong for dirty and for clean-but-dirty repos
+## RPT-015 - Table column widths are computed in bytes (three CLI renderers left)
 
-Reported by ccu.
+Reported by core. Narrowed: fixed in `core/src/output.rs` only.
 
-`global.rs::generate_upgrade_commands` emits
-`cd <path> && git pull && cargo install --path .` for path installs even when
-`has_dirty_changes` is true, where `git pull` will refuse. Conversely, a path
-repo that is only dirty (0 commits behind) has `has_update: false`, so it renders
-as "dirty" in the table but gets no command at all.
+The filed mechanism was slightly wrong, and the correction matters for the
+remaining sites. `{:<w$}` does *not* count bytes: string padding goes through
+`Formatter::pad`, which measures in `chars().count()`. The defect is a unit
+mismatch - widths computed in bytes, padding applied in chars - so a multi-byte
+name over-pads its column by the number of UTF-8 continuation bytes. The fix is
+to compute widths with `chars().count()` so both sides use one metric.
 
-## RPT-015 - Table column widths are computed in bytes
+The same `.len()`-into-`{:<w$}` pattern is replicated verbatim in the three CLI
+renderers, which the entry as filed did not name:
 
-Reported by core.
+- `ccu/src/output.rs` - two width blocks (project table, global table)
+- `pcu/src/output.rs` - two blocks (package table, series table)
+- `ncu/src/output.rs` - one block
 
-`core/src/output.rs` computes `max_name`/`max_from`/`max_to` with `str::len()`
-and pads with `{:<name_w$}`, which also counts bytes. Any non-ASCII package name
-or version string misaligns the table. `chars().count()` or a width crate is the
-fix.
+Adding `unicode-width` was considered and argued down: `Formatter::pad` has no
+hook for a custom metric, so display-width correctness would mean hand-rolled
+padding in every row printer, and no string that reaches these renderers can be
+non-ASCII (crates.io, npm and PEP 508 names are all ASCII by grammar, as are
+semver and PEP 440 versions). The reasoning is recorded at the code site.
+
+## RPT-019 - `ccu/src/output.rs` shortens a git hash with an unguarded byte slice
+
+Lateral finding from the RPT-015 work.
+
+`&h[..7.min(h.len())]` guards the length but not char-boundary alignment: a
+non-ASCII `h` whose byte 7 falls mid-codepoint panics. Not reachable today,
+since git hashes are hex, but `str::get(..7)` or `chars().take(7)` removes the
+sharp edge for free.
+
+## RPT-020 - Workspace manifest warnings on every check run
+
+Lateral finding, reported independently by four hunters in this wave.
+
+`cargo` reports `workspace.package.rust-version` as unused at the root
+`Cargo.toml`, and `package.readme` as inferable in all three binary crates.
+Cosmetic, but they appear in the output of every `brokkr check` and so add
+constant noise to every future wave's diagnostics.
 
 ## RPT-016 - Both registry clients fetch far more than they need, with no caching
 
@@ -258,4 +291,14 @@ Reported by ncu, pcu-runtime, core.
   the annotation is stale and would hide a genuinely dead field later. (The
   hunter judged the yanked *policy* - drop a release only when every file is
   yanked - defensible.)
-- `core::VersionSpec::max_major()` is unused and inconsistent: see VER-016.
+- `core::VersionSpec::max_major()` was unused and inconsistent; it has since
+  been deleted, with the reasoning recorded at the site.
+
+## RPT-021 - `GitStatus::commits_behind` is populated from `ahead_by`
+
+Lateral finding from the RPT-005 work.
+
+`ccu/src/global.rs::check_github_repo` reads `ahead_by` from the GitHub compare
+response - commits on HEAD that the installed hash lacks, which is the right
+number - and stores it in a field named `commits_behind`. The value is correct
+and the name inverts it. A comment or a rename, not a behavior change.

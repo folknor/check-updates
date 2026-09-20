@@ -1,6 +1,6 @@
 use super::{Dependency, DependencyParser};
-use check_updates_core::VersionSpec;
 use anyhow::{Context, Result};
+use check_updates_core::VersionSpec;
 use std::fs;
 use std::path::Path;
 
@@ -96,6 +96,8 @@ impl RequirementsParser {
             line_number,
             original_line,
             manifest_key: None,
+            // requirements.txt is a flat list; there is no section to scope to.
+            section: None,
         })
     }
 

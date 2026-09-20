@@ -1,6 +1,6 @@
 use super::{Dependency, DependencyParser};
-use check_updates_core::VersionSpec;
 use anyhow::{Context, Result};
+use check_updates_core::VersionSpec;
 use std::fs;
 use std::path::Path;
 use toml::Value;
@@ -36,9 +36,15 @@ impl PyProjectParser {
         {
             for dep_value in deps {
                 if let Some(dep_str) = dep_value.as_str()
-                    && let Some(dep) = self.parse_dependency_string(dep_str, path, content) {
-                        dependencies.push(dep);
-                    }
+                    && let Some(dep) = self.parse_dependency_string(
+                        dep_str,
+                        path,
+                        content,
+                        "project.dependencies",
+                    )
+                {
+                    dependencies.push(dep);
+                }
             }
         }
 
@@ -48,14 +54,16 @@ impl PyProjectParser {
             .and_then(|p| p.get("optional-dependencies"))
             .and_then(|d| d.as_table())
         {
-            for (_group_name, deps_value) in optional_deps {
+            for (group_name, deps_value) in optional_deps {
+                let section = format!("project.optional-dependencies.{group_name}");
                 if let Some(deps) = deps_value.as_array() {
                     for dep_value in deps {
                         if let Some(dep_str) = dep_value.as_str()
-                            && let Some(dep) = self.parse_dependency_string(dep_str, path, content)
-                            {
-                                dependencies.push(dep);
-                            }
+                            && let Some(dep) =
+                                self.parse_dependency_string(dep_str, path, content, &section)
+                        {
+                            dependencies.push(dep);
+                        }
                     }
                 }
             }
@@ -85,8 +93,13 @@ impl PyProjectParser {
                 if pkg_name == "python" {
                     continue;
                 }
-                if let Some(dep) = self.parse_poetry_dependency(pkg_name, version_value, path, content)
-                {
+                if let Some(dep) = self.parse_poetry_dependency(
+                    pkg_name,
+                    version_value,
+                    path,
+                    content,
+                    "tool.poetry.dependencies",
+                ) {
                     dependencies.push(dep);
                 }
             }
@@ -100,8 +113,13 @@ impl PyProjectParser {
             .and_then(|d| d.as_table())
         {
             for (pkg_name, version_value) in deps {
-                if let Some(dep) = self.parse_poetry_dependency(pkg_name, version_value, path, content)
-                {
+                if let Some(dep) = self.parse_poetry_dependency(
+                    pkg_name,
+                    version_value,
+                    path,
+                    content,
+                    "tool.poetry.dev-dependencies",
+                ) {
                     dependencies.push(dep);
                 }
             }
@@ -114,14 +132,20 @@ impl PyProjectParser {
             .and_then(|p| p.get("group"))
             .and_then(|g| g.as_table())
         {
-            for (_group_name, group_value) in groups {
+            for (group_name, group_value) in groups {
+                let section = format!("tool.poetry.group.{group_name}.dependencies");
                 if let Some(deps) = group_value.get("dependencies").and_then(|d| d.as_table()) {
                     for (pkg_name, version_value) in deps {
                         if pkg_name == "python" {
                             continue;
                         }
-                        if let Some(dep) = self.parse_poetry_dependency(pkg_name, version_value, path, content)
-                        {
+                        if let Some(dep) = self.parse_poetry_dependency(
+                            pkg_name,
+                            version_value,
+                            path,
+                            content,
+                            &section,
+                        ) {
                             dependencies.push(dep);
                         }
                     }
@@ -150,9 +174,15 @@ impl PyProjectParser {
         {
             for dep_value in deps {
                 if let Some(dep_str) = dep_value.as_str()
-                    && let Some(dep) = self.parse_dependency_string(dep_str, path, content) {
-                        dependencies.push(dep);
-                    }
+                    && let Some(dep) = self.parse_dependency_string(
+                        dep_str,
+                        path,
+                        content,
+                        "tool.pdm.dependencies",
+                    )
+                {
+                    dependencies.push(dep);
+                }
             }
         }
 
@@ -163,14 +193,16 @@ impl PyProjectParser {
             .and_then(|p| p.get("dev-dependencies"))
             .and_then(|d| d.as_table())
         {
-            for (_group_name, deps_value) in dev_deps {
+            for (group_name, deps_value) in dev_deps {
+                let section = format!("tool.pdm.dev-dependencies.{group_name}");
                 if let Some(deps) = deps_value.as_array() {
                     for dep_value in deps {
                         if let Some(dep_str) = dep_value.as_str()
-                            && let Some(dep) = self.parse_dependency_string(dep_str, path, content)
-                            {
-                                dependencies.push(dep);
-                            }
+                            && let Some(dep) =
+                                self.parse_dependency_string(dep_str, path, content, &section)
+                        {
+                            dependencies.push(dep);
+                        }
                     }
                 }
             }
@@ -193,14 +225,16 @@ impl PyProjectParser {
             .get("dependency-groups")
             .and_then(|d| d.as_table())
         {
-            for (_group_name, deps_value) in groups {
+            for (group_name, deps_value) in groups {
+                let section = format!("dependency-groups.{group_name}");
                 if let Some(deps) = deps_value.as_array() {
                     for dep_value in deps {
                         if let Some(dep_str) = dep_value.as_str()
-                            && let Some(dep) = self.parse_dependency_string(dep_str, path, content)
-                            {
-                                dependencies.push(dep);
-                            }
+                            && let Some(dep) =
+                                self.parse_dependency_string(dep_str, path, content, &section)
+                        {
+                            dependencies.push(dep);
+                        }
                     }
                 }
             }
@@ -216,6 +250,7 @@ impl PyProjectParser {
         value: &Value,
         path: &Path,
         content: &str,
+        section: &str,
     ) -> Option<Dependency> {
         let version_str = match value {
             // Simple string version: package = "^1.0"
@@ -241,6 +276,7 @@ impl PyProjectParser {
             line_number,
             original_line,
             manifest_key: None,
+            section: Some(section.to_string()),
         })
     }
 
@@ -250,6 +286,7 @@ impl PyProjectParser {
         dep_str: &str,
         path: &Path,
         content: &str,
+        section: &str,
     ) -> Option<Dependency> {
         // Split by comparison operators
         let dep_str = dep_str.trim();
@@ -276,7 +313,8 @@ impl PyProjectParser {
                 let version_spec = VersionSpec::parse(version_part).ok()?;
 
                 // Find line number and original line
-                let (line_number, original_line) = self.find_line_in_content(content, pkg_name, version_part);
+                let (line_number, original_line) =
+                    self.find_line_in_content(content, pkg_name, version_part);
 
                 return Some(Dependency {
                     name: pkg_name.to_lowercase().replace('_', "-"),
@@ -285,6 +323,7 @@ impl PyProjectParser {
                     line_number,
                     original_line,
                     manifest_key: None,
+                    section: Some(section.to_string()),
                 });
             }
         }
@@ -301,6 +340,7 @@ impl PyProjectParser {
                 line_number,
                 original_line,
                 manifest_key: None,
+                section: Some(section.to_string()),
             });
         }
 
@@ -308,7 +348,12 @@ impl PyProjectParser {
     }
 
     /// Find the line number and original line text for a dependency in the file content
-    fn find_line_in_content(&self, content: &str, pkg_name: &str, version_str: &str) -> (usize, String) {
+    fn find_line_in_content(
+        &self,
+        content: &str,
+        pkg_name: &str,
+        version_str: &str,
+    ) -> (usize, String) {
         // Search for the line containing the package name
         for (i, line) in content.lines().enumerate() {
             let line_lower = line.to_lowercase();
