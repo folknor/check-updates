@@ -36,7 +36,7 @@ thiserror.workspace = true
 # Python-specific
 serde_yaml = "0.9"
 url = "2"
-dirs = "6"
+dirs = "7"
 
 [dev-dependencies]
 tempfile.workspace = true
