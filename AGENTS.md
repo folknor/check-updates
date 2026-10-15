@@ -22,7 +22,7 @@ Use `brokkr` (not `cargo`) for check/test. Output is never capped or scoped: eve
   - `--raw` - bypass output filtering, print everything cargo emits.
   - `--debug` - build and run the test in dev profile instead of release. Use this for subprocess-lifecycle / IPC / boot-path tests where release-LTO compile time dominates wall time and the optimization level doesn't change the behavior under test. `BROKKR_TEST_BIN_DIR` points at `<target>/debug` accordingly.
 
-`./release.sh` builds release and installs `ccu`, `pcu` and `ncu` to `~/.local/bin/`.
+`brokkr install` installs `ccu`, `pcu` and `ncu` to `~/.cargo/bin/` (`cargo install --locked`, packages listed under `[bin] install` in `brokkr.toml`).
 
 ## Workspace Conventions
 

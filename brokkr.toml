@@ -1,4 +1,7 @@
 project = "check-updates"
 
+[bin]
+install = ["cargo-check-updates", "python-check-updates", "node-check-updates"]
+
 [test]
 debug = true
