@@ -7,18 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Fixed
-- Bugs fixed across `ccu`, `pcu` and `ncu`: version parsing and ordering, manifest discovery, manifest rewriting, and registry error reporting. No behaviour was changed except where the code contradicted its own documentation, the ecosystem it targets (semver, PEP 440, PEP 508, npm syntax), or itself.
+## [0.5.0] - 2026-10-18
 
 ### Added
-- `pcu` reads `pylock.toml`, `Pipfile.lock`, `requirements.lock` and `conda-lock.yml` for installed versions; `ncu` reads bun's text `bun.lock`.
-- Rows that `-u` cannot write - an unmodellable constraint, or a declaration with no version - are marked in the table with a reason, and carry `updatable` / `blocked_reason` in `--json`.
-- `--json` registry errors carry `package` and a stable `kind`.
-- A dependency whose registry lookup failed now keeps a row instead of vanishing: the table marks it `could not check`, and `--json` keeps it in `checks` with `check_failed: true` and `latest: null`. "Up to date" and "we could not check" are no longer indistinguishable.
+- `pcu` reads `pylock.toml`, `Pipfile.lock`, `requirements.lock` and `conda-lock.yml`; `ncu` reads `bun.lock`.
+- A dependency whose registry lookup failed is shown as `could not check` instead of disappearing. In `--json` it stays in `checks` with `check_failed: true`.
+- Rows `-u` cannot write are marked with a reason; `--json` adds `updatable` and `blocked_reason`.
+- `--json` errors carry `package` and a `kind` that separates `not_found` from network failures.
 
 ### Changed
-- `ncu -g --json` checks now match `ccu -g`: `latest` is renamed `latest_version` (null when the lookup failed), and each check carries `check_failed` and `severity`. A package whose registry lookup failed keeps a row instead of appearing only in `errors`.
-- `ccu` and `pcu` no longer abort when *every* registry lookup fails; a total failure is reported the same way a partial one always was, as unchecked rows plus the registry errors.
+- **JSON:** `ccu --json` no longer has an `unchecked` array; those dependencies are in `checks` with `check_failed: true`.
+- **JSON:** `ncu -g --json` matches `ccu -g`: `latest` is renamed `latest_version`, and checks gain `check_failed` and `severity`.
+- `ccu` and `pcu` no longer abort when every registry lookup fails.
+
+### Fixed
+- Version parsing and ordering: pre-releases, post-releases, epochs and four-part versions.
+- `-u` only writes the manifest section a dependency was declared in, and preserves formatting.
+- Discovery: running `ccu` inside a workspace member, `pcu` requirements with extras or reversed ranges, and `ncu` no longer scanning `node_modules`.
+- Registry failures are no longer reported as "not found" or as "up to date".
 
 ## [0.4.0] - 2026-07-17
 
