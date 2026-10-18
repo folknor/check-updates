@@ -31,8 +31,14 @@ pub struct GlobalPackage {
 #[derive(Debug, Clone, Serialize)]
 pub struct GlobalCheck {
     pub package: GlobalPackage,
-    pub latest: Version,
+    /// The version the row targets: the registry's latest, or the newest in
+    /// the installed major under `-m`. `None` when the lookup failed.
+    pub latest_version: Option<Version>,
     pub has_update: bool,
+    /// Whether the registry lookup failed, so `has_update: false` means
+    /// "unknown" rather than "up to date". Matches ccu's global checks, which
+    /// keep such a row instead of dropping the package from the output.
+    pub check_failed: bool,
 }
 
 impl GlobalCheck {
@@ -45,12 +51,12 @@ impl GlobalCheck {
     /// `has_update == true` would print a blank severity: the struct says there is an
     /// update and the severity says there is not.
     pub fn update_severity(&self) -> Option<UpdateSeverity> {
-        if !self.has_update {
+        if !self.has_update || self.check_failed {
             return None;
         }
         DependencyResolver::calculate_severity(
             Some(&self.package.installed_version),
-            Some(&self.latest),
+            self.latest_version.as_ref(),
         )
     }
 }
@@ -180,33 +186,33 @@ mod tests {
             source: GlobalSource::Npm,
         };
 
-        let check = GlobalCheck {
+        let check = |latest: &str, has_update: bool| GlobalCheck {
             package: pkg.clone(),
-            latest: Version::from_str("2.0.0").expect("valid version"),
-            has_update: true,
+            latest_version: Some(Version::from_str(latest).expect("valid version")),
+            has_update,
+            check_failed: false,
         };
-        assert_eq!(check.update_severity(), Some(UpdateSeverity::Major));
+        assert_eq!(
+            check("2.0.0", true).update_severity(),
+            Some(UpdateSeverity::Major)
+        );
+        assert_eq!(
+            check("1.1.0", true).update_severity(),
+            Some(UpdateSeverity::Minor)
+        );
+        assert_eq!(
+            check("1.0.1", true).update_severity(),
+            Some(UpdateSeverity::Patch)
+        );
+        assert_eq!(check("1.0.0", false).update_severity(), None);
 
-        let check = GlobalCheck {
+        let failed = GlobalCheck {
             package: pkg.clone(),
-            latest: Version::from_str("1.1.0").expect("valid version"),
-            has_update: true,
-        };
-        assert_eq!(check.update_severity(), Some(UpdateSeverity::Minor));
-
-        let check = GlobalCheck {
-            package: pkg.clone(),
-            latest: Version::from_str("1.0.1").expect("valid version"),
-            has_update: true,
-        };
-        assert_eq!(check.update_severity(), Some(UpdateSeverity::Patch));
-
-        let check = GlobalCheck {
-            package: pkg,
-            latest: Version::from_str("1.0.0").expect("valid version"),
+            latest_version: None,
             has_update: false,
+            check_failed: true,
         };
-        assert_eq!(check.update_severity(), None);
+        assert_eq!(failed.update_severity(), None);
     }
 
     // A move that is newer without changing the triple is still an update. The
@@ -221,8 +227,9 @@ mod tests {
                     installed_version: Version::from_str(from).expect("valid version"),
                     source: GlobalSource::Npm,
                 },
-                latest: Version::from_str(to).expect("valid version"),
+                latest_version: Some(Version::from_str(to).expect("valid version")),
                 has_update: true,
+                check_failed: false,
             }
             .update_severity()
         };
@@ -242,8 +249,9 @@ mod tests {
                     installed_version: Version::from_str("5.4.5").expect("valid version"),
                     source: GlobalSource::Npm,
                 },
-                latest: Version::from_str("5.6.3").expect("valid version"),
+                latest_version: Some(Version::from_str("5.6.3").expect("valid version")),
                 has_update: true,
+                check_failed: false,
             },
             GlobalCheck {
                 package: GlobalPackage {
@@ -251,8 +259,19 @@ mod tests {
                     installed_version: Version::from_str("3.2.5").expect("valid version"),
                     source: GlobalSource::Npm,
                 },
-                latest: Version::from_str("3.2.5").expect("valid version"),
+                latest_version: Some(Version::from_str("3.2.5").expect("valid version")),
                 has_update: false,
+                check_failed: false,
+            },
+            GlobalCheck {
+                package: GlobalPackage {
+                    name: "eslint".to_string(),
+                    installed_version: Version::from_str("9.0.0").expect("valid version"),
+                    source: GlobalSource::Npm,
+                },
+                latest_version: None,
+                has_update: false,
+                check_failed: true,
             },
         ];
 
@@ -269,8 +288,9 @@ mod tests {
                 installed_version: Version::from_str("5.6.3").expect("valid version"),
                 source: GlobalSource::Npm,
             },
-            latest: Version::from_str("5.6.3").expect("valid version"),
+            latest_version: Some(Version::from_str("5.6.3").expect("valid version")),
             has_update: false,
+            check_failed: false,
         }];
 
         let commands = generate_upgrade_commands(&checks);

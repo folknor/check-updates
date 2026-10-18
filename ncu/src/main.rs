@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use check_updates_core::{DependencyCheck, DependencyResolver, Version};
+use check_updates_core::{DependencyCheck, DependencyResolver, UpdateSeverity, Version};
+use serde::Serialize;
 use clap::Parser;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -15,6 +16,14 @@ use ncu::updater::FileUpdater;
 
 const SCHEMA_VERSION: u32 = 1;
 const TOOL_NAME: &str = "ncu";
+
+/// Wraps a GlobalCheck so JSON output includes the computed severity.
+#[derive(Serialize)]
+struct GlobalCheckJson<'a> {
+    #[serde(flatten)]
+    inner: &'a GlobalCheck,
+    severity: Option<UpdateSeverity>,
+}
 
 /// One JSON object per failed registry lookup. `kind` is the stable tag from
 /// `FetchErrorKind::as_str`, so a consumer can tell `not_found` from
@@ -100,11 +109,18 @@ fn emit_json_project(checks: &[DependencyCheck], errors: &[FetchError]) -> Resul
 }
 
 fn emit_json_global(checks: &[GlobalCheck], errors: &[FetchError]) -> Result<()> {
+    let with_severity: Vec<GlobalCheckJson<'_>> = checks
+        .iter()
+        .map(|c| GlobalCheckJson {
+            inner: c,
+            severity: c.update_severity(),
+        })
+        .collect();
     let report = serde_json::json!({
         "schema_version": SCHEMA_VERSION,
         "tool": TOOL_NAME,
         "mode": "global",
-        "checks": checks,
+        "checks": with_severity,
         "errors": errors_to_json(errors),
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -202,8 +218,19 @@ async fn run_global_mode(args: &Args) -> Result<()> {
 
             checks.push(GlobalCheck {
                 package,
-                latest: target,
+                latest_version: Some(target),
                 has_update,
+                check_failed: false,
+            });
+        } else {
+            // The registry never answered. Keep a row, as ccu does, so the
+            // JSON `checks` array lists every installed package and a missing
+            // entry can never be read as "up to date".
+            checks.push(GlobalCheck {
+                package,
+                latest_version: None,
+                has_update: false,
+                check_failed: true,
             });
         }
     }

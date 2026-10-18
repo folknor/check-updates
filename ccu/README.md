@@ -51,9 +51,11 @@ $ ccu --json | jq '.checks[] | select(.severity != null) | {name: .dependency.na
 }
 ```
 
-Schema: `{ schema_version, tool, mode, checks[], unchecked[], errors[] }`. `unchecked[]` lists dependencies that were found but could not be looked up (`name`, `source_file`, `section`); `errors[]` carries one entry per failed registry lookup (`package`, `kind`, `message`), where `kind` separates `not_found` from failures like a rate limit.
+Schema: `{ schema_version, tool, mode, checks[], errors[] }`. `checks[]` holds every declared dependency, including ones that could not be looked up: those carry `check_failed: true` and `latest: null`. `errors[]` carries one entry per failed registry lookup (`package`, `kind`, `message`), where `kind` separates `not_found` from failures like a rate limit.
 
-In `-g` mode there is no `unchecked[]`, and each check nests the installed package under `package`:
+stdout carries only the JSON document; progress bars and warnings go to stderr. A hard failure (bad path, unparseable manifest) exits non-zero with nothing on stdout.
+
+In `-g` mode each check nests the installed package under `package`, and lists every installed crate whether or not it has an update:
 
 ```
 $ ccu -g --json | jq '.checks[] | {name: .package.name, source: .package.source, installed: .package.installed_version, latest: .latest_version}'

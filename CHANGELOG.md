@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A dependency whose registry lookup failed now keeps a row instead of vanishing: the table marks it `could not check`, and `--json` keeps it in `checks` with `check_failed: true` and `latest: null`. "Up to date" and "we could not check" are no longer indistinguishable.
 
 ### Changed
+- `ncu -g --json` checks now match `ccu -g`: `latest` is renamed `latest_version` (null when the lookup failed), and each check carries `check_failed` and `severity`. A package whose registry lookup failed keeps a row instead of appearing only in `errors`.
 - `ccu` and `pcu` no longer abort when *every* registry lookup fails; a total failure is reported the same way a partial one always was, as unchecked rows plus the registry errors.
 
 ## [0.4.0] - 2026-07-17

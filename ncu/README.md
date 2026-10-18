@@ -51,7 +51,17 @@ $ ncu --json | jq '.checks[] | select(.severity != null) | {name: .dependency.na
 }
 ```
 
-Schema: `{ schema_version, tool, mode, checks[], errors[] }`.
+Schema: `{ schema_version, tool, mode, checks[], errors[] }`. `checks[]` holds every declared dependency, including ones that could not be looked up: those carry `check_failed: true` and `latest: null`. `errors[]` carries one entry per failed registry lookup (`package`, `kind`, `message`).
+
+stdout carries only the JSON document; progress bars and warnings go to stderr. A hard failure (bad path, unparseable manifest) exits non-zero with nothing on stdout.
+
+In `-g` mode each check nests the installed package under `package` and lists every global package whether or not it has an update:
+
+```
+$ ncu -g --json | jq '.checks[] | {name: .package.name, installed: .package.installed_version, latest: .latest_version, severity}'
+```
+
+`package` carries `name`, `installed_version` and `source` (`npm`). The check itself carries `latest_version`, `has_update`, `check_failed` and `severity`, the same names `ccu -g` uses. `check_failed: true` means `has_update: false` is "unknown", not "up to date".
 
 ## Supported files
 

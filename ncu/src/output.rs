@@ -70,9 +70,15 @@ impl GlobalTableRenderer {
             .map(|c| c.package.installed_version.to_string().chars().count())
             .max()
             .unwrap_or(0);
+        let latest_str = |c: &GlobalCheck| {
+            c.latest_version
+                .as_ref()
+                .map(std::string::ToString::to_string)
+                .unwrap_or_default()
+        };
         let max_latest = checks
             .iter()
-            .map(|c| c.latest.to_string().chars().count())
+            .map(|c| latest_str(c).chars().count())
             .max()
             .unwrap_or(0);
 
@@ -114,7 +120,7 @@ impl GlobalTableRenderer {
                 "  {:<name_w$}  {:>inst_w$} \u{2192} {:<to_w$}  {}",
                 check.package.name,
                 check.package.installed_version.to_string(),
-                check.latest.to_string(),
+                latest_str(check),
                 severity_str,
                 name_w = max_name,
                 inst_w = max_installed,
