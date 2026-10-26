@@ -1,8 +1,7 @@
 use anyhow::Result;
-use check_updates_core::{Dependency, DependencyCheck, DependencyResolver};
+use check_updates_core::{Dependency, DependencyCheck, DependencyResolver, progress_bar};
 use clap::Parser;
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 use pcu::cli::Args;
 use pcu::detector::ProjectDetector;
 use pcu::global::{GlobalCheck, GlobalPackageDiscovery, UpgradeCommand, generate_upgrade_commands};
@@ -293,16 +292,7 @@ async fn run_global_mode(args: &Args) -> Result<()> {
 
     let pypi_client = PyPiClient::new(args.pre_release);
 
-    // Create progress bar
-    let progress_bar = ProgressBar::new(package_names.len() as u64);
-    progress_bar.set_style(
-        ProgressStyle::default_bar()
-            .template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
-            )
-            .expect("valid progress template")
-            .progress_chars("#>-"),
-    );
+    let progress_bar = progress_bar(package_names.len() as u64);
 
     let pb_clone = Arc::new(Mutex::new(progress_bar.clone()));
     let result = pypi_client
@@ -575,16 +565,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     let pypi_client = PyPiClient::new(args.pre_release);
 
-    // Create progress bar
-    let progress_bar = ProgressBar::new(package_names.len() as u64);
-    progress_bar.set_style(
-        ProgressStyle::default_bar()
-            .template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
-            )
-            .expect("valid progress template")
-            .progress_chars("#>-"),
-    );
+    let progress_bar = progress_bar(package_names.len() as u64);
 
     let progress_bar_clone = Arc::new(Mutex::new(progress_bar.clone()));
 

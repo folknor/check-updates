@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,7 +17,7 @@ use ccu::output::GlobalTableRenderer;
 use ccu::parsers::{CargoLockParser, CargoTomlParser, DependencyParser};
 use ccu::updater::FileUpdater;
 use check_updates_core::{
-    DependencyCheck, DependencyResolver, TableRenderer, UpdateSeverity, Version,
+    DependencyCheck, DependencyResolver, TableRenderer, UpdateSeverity, Version, progress_bar,
 };
 
 const SCHEMA_VERSION: u32 = 1;
@@ -219,15 +218,7 @@ async fn run_global_mode(args: &Args) -> Result<()> {
     // 2. Check path repos (local git fetch), query crates.io, and check git repos concurrently
     let cratesio_client = CratesIoClient::new(args.pre_release);
 
-    let progress_bar = ProgressBar::new((registry_names.len() + git_count) as u64);
-    progress_bar.set_style(
-        ProgressStyle::default_bar()
-            .template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
-            )
-            .expect("valid progress template")
-            .progress_chars("#>-"),
-    );
+    let progress_bar = progress_bar((registry_names.len() + git_count) as u64);
 
     // The bar spans both producers (registry lookups plus git remote checks), so
     // each reports its own completed count into a shared pair of counters and the
@@ -455,16 +446,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
 
     let cratesio_client = CratesIoClient::new(args.pre_release);
 
-    // Create progress bar
-    let progress_bar = ProgressBar::new(package_names.len() as u64);
-    progress_bar.set_style(
-        ProgressStyle::default_bar()
-            .template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
-            )
-            .expect("valid progress template")
-            .progress_chars("#>-"),
-    );
+    let progress_bar = progress_bar(package_names.len() as u64);
 
     let progress_bar_clone = Arc::new(Mutex::new(progress_bar.clone()));
 

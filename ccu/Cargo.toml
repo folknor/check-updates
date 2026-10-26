@@ -28,7 +28,6 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-indicatif.workspace = true
 colored.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

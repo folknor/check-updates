@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
-use check_updates_core::{DependencyCheck, DependencyResolver, UpdateSeverity, Version};
+use check_updates_core::{
+    DependencyCheck, DependencyResolver, UpdateSeverity, Version, progress_bar,
+};
 use serde::Serialize;
 use clap::Parser;
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet};
 
 use ncu::cli::Args;
@@ -167,13 +168,7 @@ async fn run_global_mode(args: &Args) -> Result<()> {
         .into_iter()
         .collect();
 
-    let progress = ProgressBar::new(package_names.len() as u64);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-            .expect("valid progress template")
-            .progress_chars("=>-"),
-    );
+    let progress = progress_bar(package_names.len() as u64);
 
     let pb = progress.clone();
     let results = client
@@ -325,13 +320,7 @@ async fn run_project_mode(args: &Args) -> Result<()> {
     package_names.sort();
     package_names.dedup();
 
-    let progress = ProgressBar::new(package_names.len() as u64);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-            .expect("valid progress template")
-            .progress_chars("=>-"),
-    );
+    let progress = progress_bar(package_names.len() as u64);
 
     let pb = progress.clone();
     let results = client

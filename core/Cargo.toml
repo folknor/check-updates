@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 colored = "3"
+indicatif.workspace = true
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 

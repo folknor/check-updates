@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- `ncu` uses the same progress bar as `ccu` and `pcu`, so it now shows elapsed time and ETA.
+
 ## [0.5.0] - 2026-10-18
 
 ### Added
